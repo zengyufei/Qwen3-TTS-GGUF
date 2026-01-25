@@ -10,6 +10,7 @@ sys.path.append(os.path.join(os.path.dirname(os.path.abspath(__file__)), "Qwen3-
 
 from qwen3_tts_gguf import logger
 from qwen3_tts_gguf.codec_export import CodecExportWrapper, CodecEncoderExportWrapper
+from qwen_tts.core.tokenizer_12hz.modeling_qwen3_tts_tokenizer_v2 import Qwen3TTSTokenizerV2Model
 
 # 移除本地 logging 配置，直接使用导入的 logger
 
@@ -42,7 +43,7 @@ def main():
 
     # 3. 准备导出包装器 (Decoder)
     logger.info("准备 ONNX 导出包装器 (Decoder)...")
-    decoder_wrapper = CodecExportWrapper(model)
+    decoder_wrapper = CodecExportWrapper(model).eval()
     
     # Decoder Dummy Input
     # Shape: [Batch=1, Time=100, NumQuantizers=ModelConfig.num_quantizers]
@@ -62,7 +63,7 @@ def main():
                 'audio_codes': {0: 'batch_size', 1: 'sequence_length'},
                 'audio_values': {0: 'batch_size', 1: 'sequence_length'}
             },
-            opset_version=18,
+            opset_version=18, # Use latest stable for PyTorch 2.x
             do_constant_folding=True
         )
         logger.info("Decoder ONNX 导出成功！")
@@ -71,7 +72,7 @@ def main():
 
     ONNX_ENCODER_PATH = os.path.join(OUTPUT_DIR, 'Qwen3-Codec-Encoder.onnx')
     logger.info("准备 ONNX 导出包装器 (Encoder)...")
-    encoder_wrapper = CodecEncoderExportWrapper(model)
+    encoder_wrapper = CodecEncoderExportWrapper(model).eval()
     
     # Encoder Dummy Input
     # Shape: [Batch=1, Time=24000*3] (3 seconds audio at 24000Hz)
@@ -80,8 +81,12 @@ def main():
     # Encoder Export
     logger.info(f"开始导出 Encoder ONNX 到: {ONNX_ENCODER_PATH}")
     try:
+        # Pre-trace the model to bypass Dynamo strictness (workaround for PyTorch 2.x)
+        logger.info("Tracing Encoder with torch.jit.trace...")
+        traced_encoder = torch.jit.trace(encoder_wrapper, (encoder_dummy_input,), check_trace=False)
+        
         torch.onnx.export(
-            encoder_wrapper,
+            traced_encoder,
             (encoder_dummy_input,),
             ONNX_ENCODER_PATH,
             input_names=['input_values'], # raw audio
@@ -90,7 +95,7 @@ def main():
                 'input_values': {0: 'batch_size', 1: 'sequence_length'},
                 'audio_codes': {0: 'batch_size', 1: 'sequence_length'}
             },
-            opset_version=18,
+            opset_version=18, # Upgrade to 18
             do_constant_folding=True
         )
         logger.info("Encoder ONNX 导出成功！")
