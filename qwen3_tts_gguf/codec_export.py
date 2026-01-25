@@ -114,3 +114,74 @@ class CodecExportWrapper(nn.Module):
         wav = self.decoder(codes)
         # Output: [B, 1, T] -> [B, T]
         return wav.squeeze(1)
+
+class SpeakerEncoderExportWrapper(nn.Module):
+    """
+    Qwen3-TTS 说话人编码器导出包装类。
+    """
+    def __init__(self, speaker_encoder):
+        super().__init__()
+        self.speaker_encoder = speaker_encoder
+        self.speaker_encoder.eval()
+
+    def forward(self, mels):
+        """
+        Args:
+            mels (torch.FloatTensor): [Batch, Seq, MelDim(128)]
+        Returns:
+            spk_emb (torch.FloatTensor): [Batch, 512]
+        """
+        return self.speaker_encoder(mels)
+
+class MTPStepExportWrapper(nn.Module):
+    """
+    Qwen3-TTS MTP (Code Predictor) 单步导出包装类。
+    因为 MTP 有 15 个不同的 Head 和 Embedding，我们将它们全部包含进来。
+    """
+    def __init__(self, code_predictor):
+        super().__init__()
+        self.code_predictor_model = code_predictor.model
+        self.lm_heads = code_predictor.lm_head # ModuleList of 15 Linears
+        self.small_to_mtp_projection = code_predictor.small_to_mtp_projection
+        self.eval()
+
+    def forward(self, inputs_embeds, step_idx, past_key_values_list=None):
+        """
+        Args:
+            inputs_embeds: [Batch, Seq, Hidden]
+            step_idx: int (0 to 14)
+            past_key_values_list: Optional list/tuple of past KV
+        """
+        # 1. Project if needed
+        hidden_states = self.small_to_mtp_projection(inputs_embeds)
+        
+        # 2. Model Forward
+        # 注意：这里我们简化处理，假设一次跑一步或者一段。
+        # 为了 ONNX 导出方便，我们可能需要更具体的 KV Cache 处理。
+        # 但 MTP 总共只有 15 步，且序列很短（总共 16 2?），不带 KV Cache 跑 full self-attn 也可以。
+        # 考虑到复杂度，这里先实现一个全序列版本的，推理时我们可以拼接序列。
+        
+        outputs = self.code_predictor_model(
+            inputs_embeds=hidden_states,
+            past_key_values=None, # 简化：不使用 KV Cache 避免 ONNX 复杂化
+            use_cache=False
+        )
+        
+        last_hidden = outputs.last_hidden_state[:, -1:, :]
+        
+        # 3. Apply the specific head for this step
+        # 由于 ONNX 不支持动态索引 ModuleList，我们需要用一种 trick 或者导出多个模型。
+        # 或者使用一个逻辑合并所有的 Head。
+        # 这里为了导出一个模型，我们写一个 loop (ONNX 会展开它或者我们可以用 index_select)
+        
+        # 假设 step_idx 是 tensor
+        all_logits = []
+        for head in self.lm_heads:
+            all_logits.append(head(last_hidden))
+        
+        # [15, B, 1, Vocab] -> [B, 1, Vocab]
+        stacked_logits = torch.stack(all_logits, dim=0)
+        # 使用 step_idx 选取对应的 logits
+        logits = stacked_logits[step_idx] 
+        
+        return logits
