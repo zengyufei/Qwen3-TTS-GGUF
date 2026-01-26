@@ -11,8 +11,8 @@ PROJECT_ROOT = os.path.dirname(os.path.abspath(__file__))
 if PROJECT_ROOT not in sys.path:
     sys.path.insert(0, PROJECT_ROOT)
 
-from bare_master.configuration_bare_master import Qwen3TTSTalkerConfig
-from bare_master.modeling_bare_master import Qwen3TTSTalkerModel
+from bare_master.configuration import Qwen3TTSTalkerConfig
+from bare_master.modeling import Qwen3TTSTalkerModel
 
 def verify_standalone_logic():
     device = "cuda" if torch.cuda.is_available() else "cpu"
@@ -30,7 +30,7 @@ def verify_standalone_logic():
     
     print(f"Initializing Standalone TalkerModel (Backbone)...")
     # 使用搬运来的 Model 类 (Backbone)
-    # 注意：modeling_bare_master.py 里的 Qwen3TTSTalkerModel 是不带 head 的
+    # 注意：modeling.py 里的 Qwen3TTSTalkerModel 是不带 head 的
     model = Qwen3TTSTalkerModel(talker_config).to(device).to(torch.bfloat16)
     
     print(f"Loading and remapping weights from: {WEIGHTS_PATH}")
@@ -60,7 +60,7 @@ def verify_standalone_logic():
     with torch.no_grad():
         # 1. 运行搬运后的骨干网络
         # 注意：这里我们要模拟原本 forward 的 position_ids 逻辑
-        # modeling_bare_master 里 forward 会自动根据 inputs_embeds 生成位置编码
+        # modeling 里 forward 会自动根据 inputs_embeds 生成位置编码
         attention_mask = torch.ones(inputs_embeds.shape[:2], device=device)
         
         outputs = model(inputs_embeds=inputs_embeds, attention_mask=attention_mask)

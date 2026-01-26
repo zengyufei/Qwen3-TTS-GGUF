@@ -44,7 +44,7 @@ from transformers.utils import can_return_tuple, logging
 from transformers.utils.hub import cached_file
 
 # from .qwen3_tts_tokenizer import Qwen3TTSTokenizer
-from .configuration_bare_master import (Qwen3TTSConfig,
+from .configuration import (Qwen3TTSConfig,
                                       Qwen3TTSSpeakerEncoderConfig,
                                       Qwen3TTSTalkerCodePredictorConfig,
                                       Qwen3TTSTalkerConfig)

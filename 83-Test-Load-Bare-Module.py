@@ -1,6 +1,6 @@
 import torch
 from bare_master.configuration_bare_master import Qwen3TTSTalkerConfig
-from bare_master.modeling_bare_master import Qwen3TTSTalkerModel
+from bare_master.modeling import Qwen3TTSTalkerModel
 import json
 
 def test_load():
