@@ -51,8 +51,9 @@ def verify_standard_loading():
     from safetensors import safe_open
     MODEL_WEIGHTS = os.path.join(MODEL_PATH, "model.safetensors")
     with safe_open(MODEL_WEIGHTS, framework="pt", device=device) as f:
-        lm_head = f.get_tensor("lm_head")
-    print(f"  lm_head 形状: {lm_head.shape}")  # [2048, 3072]
+        # 使用新命名的 lm_head.weight
+        lm_head = f.get_tensor("lm_head.weight")
+    print(f"  lm_head 形状: {lm_head.shape}")  # [3072, 2048]
 
     # 准备测试数据
     print("\n正在加载测试数据...")
@@ -69,8 +70,9 @@ def verify_standard_loading():
         last_hidden_state = outputs.last_hidden_state
         next_hidden = last_hidden_state[:, -1, :]
 
-        # 使用加载的 lm_head (codec-only: [2048, 3072])
-        actual_logits = torch.matmul(next_hidden.to(torch.float32), lm_head.to(torch.float32))
+        # 使用加载的 lm_head (标准 HF 形状: [out_features, in_features] = [3072, 2048])
+        # 推理时需使用 x @ lm_head.T
+        actual_logits = torch.matmul(next_hidden.to(torch.float32), lm_head.t().to(torch.float32))
         print(f"Logits 形状: {actual_logits.shape}")  # [1, 3072]
 
     # 验证结果

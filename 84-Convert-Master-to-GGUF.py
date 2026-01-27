@@ -77,42 +77,41 @@ def main():
     GGUF_OUT = os.path.join(PROJECT_ROOT, "model", "qwen3_tts_codec_only.gguf")
     TEMP_DIR = os.path.join(PROJECT_ROOT, "model", "temp_hf")
 
-    # [步骤 A] 准备临时权重 (转置 lm_head 并统一命名)
-    # 这部分逻辑从之前的脚本继承，因为 python 调用 main() 也会读取磁盘文件
+    print(f"--- 正在执行 GGUF 转换 (零污染流程) ---")
+    print(f"源目录: {MASTER_MODEL_DIR}")
+    print(f"输出文件: {GGUF_OUT}")
+
+    # [步骤 A] 准备临时转换目录 (为了给 Key 增加 'model.' 前缀)
+    # GGUF 转换器在 qwen2 模式下期望 backbone 带有 model. 前缀
     if os.path.exists(TEMP_DIR):
         shutil.rmtree(TEMP_DIR)
     os.makedirs(TEMP_DIR)
-
-    print("[1/3] 正在为转换准备权重...")
+    
+    print("[1/3] 正在准备临时转换权重 (添加 model. 前缀)...")
     from safetensors import safe_open
     from safetensors.torch import save_file
     
-    # 读取原始文件
     src_weights = os.path.join(MASTER_MODEL_DIR, "model.safetensors")
-    master_weights = {}
+    processed_weights = {}
     
     with safe_open(src_weights, framework="pt", device="cpu") as f:
         for key in f.keys():
             tensor = f.get_tensor(key)
-            if key == "lm_head":
-                if tensor.shape == (2048, 3072):
-                    # print(f"  → Transposing lm_head to {tensor.shape} -> [3072, 2048]")
-                    tensor = tensor.t().contiguous()
-                master_weights["lm_head.weight"] = tensor
-            elif key == "embed_tokens":
-                master_weights["model.embed_tokens.weight"] = tensor
+            # lm_head 不需要前缀
+            if key.startswith("lm_head"):
+                processed_weights[key] = tensor
             else:
+                # 给骨干网络加上 model. 前缀
                 new_key = key if key.startswith("model.") else f"model.{key}"
-                master_weights[new_key] = tensor
-
-    save_file(master_weights, os.path.join(TEMP_DIR, "model.safetensors"))
-
-    # 复制配置文件
+                processed_weights[new_key] = tensor
+                
+    save_file(processed_weights, os.path.join(TEMP_DIR, "model.safetensors"))
+    
+    # 拷贝必要的配置文件
     for f in ["config.json", "vocab.json", "merges.txt", "tokenizer_config.json", "tokenizer.json"]:
         src = os.path.join(MASTER_MODEL_DIR, f)
-        dst = os.path.join(TEMP_DIR, f)
         if os.path.exists(src):
-            shutil.copy(src, dst)
+            shutil.copy(src, TEMP_DIR)
 
     # [步骤 B] 应用 Monkey Patch
     print("[2/3] 正在向 convert_hf_to_gguf.TextModel 和 ModelBase 应用补丁...")
@@ -126,7 +125,7 @@ def main():
     # [步骤 C] 调用转换器主函数
     print(f"[3/3] 正在执行 convert_hf_to_gguf.main()...")
     
-    # 构造 sys.argv
+    # 模拟命令行参数给 convert_hf_to_gguf
     sys.argv = [
         "convert_hf_to_gguf.py",
         TEMP_DIR,
@@ -139,13 +138,14 @@ def main():
         print(f"\n✅ GGUF 转换成功!")
         print(f"输出路径: {GGUF_OUT}")
     except Exception as e:
-        print(f"\n❌ 转换失败，Python 异常: {e}")
+        print(f"\n❌ 转换过程中出现错误: {e}")
         import traceback
         traceback.print_exc()
+        sys.exit(1)
     finally:
-        # 清理
-        print("[清理] 正在删除临时目录...")
-        # shutil.rmtree(TEMP_DIR) # 如需调试可取消注释
+        if os.path.exists(TEMP_DIR):
+            print(f"[清理] 正在删除临时目录...")
+            shutil.rmtree(TEMP_DIR)
 
 if __name__ == "__main__":
     main()

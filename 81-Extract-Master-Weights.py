@@ -67,16 +67,16 @@ def extract_master_weights():
         for key in f.keys():
             # 大师 backbone 权重: talker.model.*
             if key.startswith("talker.model."):
-                # 移除前缀,变成无前缀的格式
+                # 变成无前缀格式 (如 layers.0.xxx)，这样 transformers 才能直接加载
                 new_key = key.replace("talker.model.", "")
                 tensor = f.get_tensor(key)
 
                 # 特殊处理：只提取 codec_embedding (纯音频方案)
                 if key == "talker.model.codec_embedding.weight":
                     print(f"  已提取 codec embedding: {key}, 形状: {tensor.shape}")
-                    # 保存为 embed_tokens (forward 中使用 self.embed_tokens)
-                    master_weights["embed_tokens"] = tensor
-                    print(f"  -> 保存为 embed_tokens [3072, 2048]")
+                    # 保存为 embed_tokens (标准 HF 命名)
+                    master_weights["embed_tokens.weight"] = tensor
+                    print(f"  -> 保存为 embed_tokens.weight [3072, 2048]")
                     continue
 
                 # 跳过 text_embedding (纯音频方案不需要)
@@ -98,20 +98,20 @@ def extract_master_weights():
 
     print(f"\n成功提取 {len(master_weights)} 个大师模型权重")
 
-    # 3. 创建 lm_head (纯音频方案：直接用 codec_head 的转置)
+    # 3. 创建 lm_head (纯音频方案：直接用 codec_head)
     if codec_head_weight is not None:
         print(f"\n--- 正在创建 lm_head (纯音频方案) ---")
         print(f"Codec head 形状: {codec_head_weight.shape}")  # [3072, 2048]
 
-        # lm_head = codec_head.T: [3072, 2048] -> [2048, 3072]
-        lm_head = codec_head_weight.t().contiguous()  # 转置后确保内存连续
+        # 直接使用原权重作为 lm_head，遵循 HF 标准形状 [3072, 2048]
+        lm_head = codec_head_weight.contiguous()
         print(f"lm_head 形状: {lm_head.shape}")
-        print(f"  - 直接转置 codec_head (无需补零或填充)")
-        print(f"  - 词表大小: {lm_head.shape[1]} (仅限 codec tokens)")
+        print(f"  - 直接使用 codec_head (无需转置或填充)")
+        print(f"  - 词表大小: {lm_head.shape[0]} (仅限 codec tokens)")
 
-        # 保存为 lm_head (HF 标准命名)
-        master_weights["lm_head"] = lm_head
-        print(f"已添加 lm_head 用于纯音频推理")
+        # 保存为 lm_head.weight (HF 标准命名)
+        master_weights["lm_head.weight"] = lm_head
+        print(f"已添加 lm_head.weight 用于纯音频推理 (标准 HF 形状)")
     else:
         print("警告: 未找到 codec_head，模型将缺少 lm_head!")
 
