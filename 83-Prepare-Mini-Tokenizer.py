@@ -1,102 +1,84 @@
 """
-构造适配 3072 词表的迷你 Tokenizer (Mini-Tokenizer)
-以满足 80 系列模型转换 GGUF 的词表一致性要求。
-
-由于推理时采用注入 Embedding 方式，Tokenizer 内容不影响结果，只需满足数量对齐。
+83.1-Create-Zero-Tokenizer.py
+从零构造适配 3072 词表的迷你 Tokenizer。
+完全不依赖外部模型文件，直接在脚本内生成所有配置。
 """
 import os
 import json
-import shutil
 
-def prepare_mini_tokenizer():
+def create_zero_tokenizer():
     PROJECT_ROOT = os.path.dirname(os.path.abspath(__file__))
-    SOURCE_MODEL_DIR = os.path.join(PROJECT_ROOT, "Qwen3-TTS-12Hz-1.7B-CustomVoice")
     TARGET_DIR = os.path.join(PROJECT_ROOT, "model", "hf")
     
-    print(f"--- 正在准备迷你分词器 (3072 词表) ---")
-    print(f"来源目录: {SOURCE_MODEL_DIR}")
-    print(f"目标目录: {TARGET_DIR}")
+    if not os.path.exists(TARGET_DIR):
+        os.makedirs(TARGET_DIR)
+        
+    print(f"--- 正在从零构造迷你分词器 (3072 词表) ---")
+    print(f"输出目录: {TARGET_DIR}")
 
-    # 1. 处理 vocab.json，构造极限大小 (100) 的词表
-    print("[1/4] 正在构造迷你词表 (限制为 100 个字符)...")
-    vocab_path = os.path.join(SOURCE_MODEL_DIR, "vocab.json")
-    with open(vocab_path, "r", encoding="utf-8") as f:
-        full_vocab = json.load(f)
+    # 1. 构造极简词表 (vocab.json)
+    # 只要包含 BPE merge 所需的字符和特殊字符即可。
+    # 缺失的 ID 会被转换脚本自动填充为 [PAD]
+    print("[1/4] 正在生成极简词表...")
+    vocab = {}
     
-    # 彻底重构词表，只留前 100 个
-    items = sorted(full_vocab.items(), key=lambda x: x[1])
-    mini_vocab = {}
+    # 填充特殊 token
+    special_tokens = ["<|endoftext|>", "<|im_start|>", "<|im_end|>"]
+    for i, tok in enumerate(special_tokens):
+        vocab[tok] = i
+        
+    # 为 BPE 合并规则保留 a, b, ab
+    vocab["a"] = 97
+    vocab["b"] = 98
+    vocab["ab"] = 99
     
-    for i in range(100):
-        if i < len(items):
-            k, v = items[i]
-            mini_vocab[k] = i
-
-    # 强制确保 'a'(97), 'b'(98), 'ab'(99) 存在，用于 merge
-    # BPE 要求：如果规则是 a b -> ab，那么 a, b, ab 都必须在词表里
-    mini_vocab["a"] = 97
-    mini_vocab["b"] = 98
-    mini_vocab["ab"] = 99
-    
-    # 映射特殊 token 到 0
-    special_tokens_to_map = [
-        "<|endoftext|>", "<|im_start|>", "<|im_end|>", 
-        "<|vision_start|>", "<|vision_end|>", "<|vision_pad|>", 
-        "<|image_pad|>", "<|video_pad|>"
-    ]
-    for tok in special_tokens_to_map:
-        mini_vocab[tok] = 0
+    # 我们随便填充一点，凑够 10 个
+    for i in range(3, 10):
+        vocab[f"<t_{i}>"] = i
 
     with open(os.path.join(TARGET_DIR, "vocab.json"), "w", encoding="utf-8") as f:
-        json.dump(mini_vocab, f, ensure_ascii=False)
-    print(f"  ✓ 已保存 vocab.json (大小: {len(mini_vocab)})")
+        json.dump(vocab, f, ensure_ascii=False)
+    print(f"  ✓ 已保存 vocab.json (大小: {len(vocab)})")
 
-    # 2. 处理 merges.txt
-    print(f"[2/4] 正在使用 'a' 和 'b' -> 'ab' 创建虚拟 merges.txt...")
-    dummy_merge = "a b"
+    # 2. 构造 BPE 合并规则 (merges.txt)
+    print("[2/4] 正在生成极简 merges.txt...")
     with open(os.path.join(TARGET_DIR, "merges.txt"), "w", encoding="utf-8") as f:
         f.write("#version: 0.2\n")
-        f.write(f"{dummy_merge}\n")
+        f.write("a b\n")
     print(f"  ✓ 已保存 merges.txt")
 
-    # 3. 处理 tokenizer_config.json
-    print("[3/4] 正在自定义 tokenizer_config.json...")
-    config_path = os.path.join(SOURCE_MODEL_DIR, "tokenizer_config.json")
-    with open(config_path, "r", encoding="utf-8") as f:
-        t_config = json.load(f)
-    
-    t_config["added_tokens_decoder"] = {
-        "0": {
-            "content": "<|endoftext|>",
-            "lstrip": False,
-            "normalized": False,
-            "rstrip": False,
-            "special": True
-        }
+    # 3. 构造配置 (tokenizer_config.json)
+    print("[3/4] 正在生成 tokenizer_config.json...")
+    tokenizer_config = {
+        "added_tokens_decoder": {
+            "0": {"content": "<|endoftext|>", "lstrip": False, "normalized": False, "rstrip": False, "special": True},
+            "1": {"content": "<|im_start|>", "lstrip": False, "normalized": False, "rstrip": False, "special": True},
+            "2": {"content": "<|im_end|>", "lstrip": False, "normalized": False, "rstrip": False, "special": True}
+        },
+        "bos_token": "<|endoftext|>",
+        "eos_token": "<|endoftext|>",
+        "pad_token": "<|endoftext|>",
+        "unk_token": "<|endoftext|>",
+        "chat_template": "{% for message in messages %}{{'<|im_start|>' + message['role'] + '\\n' + message['content'] + '<|im_end|>' + '\\n'}}{% endfor %}{% if add_generation_prompt %}{{ '<|im_start|>assistant\\n' }}{% endif %}",
+        "clean_up_tokenization_spaces": False,
+        "model_max_length": 32768,
+        "tokenizer_class": "Qwen2Tokenizer",
+        "model_type": "qwen2"
     }
-    keys_to_remove = [k for k, v in t_config.items() if isinstance(v, dict) and "content" in v]
-    for k in keys_to_remove:
-        del t_config[k]
-        
-    t_config["bos_token"] = "<|endoftext|>"
-    t_config["eos_token"] = "<|endoftext|>"
-    t_config["pad_token"] = "<|endoftext|>"
-    t_config["unk_token"] = "<|endoftext|>"
-    t_config["tokenizer_class"] = "Qwen2Tokenizer"
-    t_config["model_type"] = "qwen2"
-    
     with open(os.path.join(TARGET_DIR, "tokenizer_config.json"), "w", encoding="utf-8") as f:
-        json.dump(t_config, f, indent=2, ensure_ascii=False)
+        json.dump(tokenizer_config, f, indent=2, ensure_ascii=False)
     print(f"  ✓ 已保存 tokenizer_config.json")
 
-    # 4. 重新生成 tokenizer.json
-    print("[4/4] 正在创建极限精简的 tokenizer.json...")
-    mini_tokenizer_json = {
+    # 4. 构造完整结构 (tokenizer.json)
+    print("[4/4] 正在生成 tokenizer.json...")
+    tokenizer_json = {
         "version": "1.0",
         "truncation": None,
         "padding": None,
         "added_tokens": [
-            {"id": 0, "content": "<|endoftext|>", "single_word": False, "lstrip": False, "rstrip": False, "normalized": False, "special": True}
+            {"id": 0, "content": "<|endoftext|>", "single_word": False, "lstrip": False, "rstrip": False, "normalized": False, "special": True},
+            {"id": 1, "content": "<|im_start|>", "single_word": False, "lstrip": False, "rstrip": False, "normalized": False, "special": True},
+            {"id": 2, "content": "<|im_end|>", "single_word": False, "lstrip": False, "rstrip": False, "normalized": False, "special": True}
         ],
         "normalizer": None,
         "pre_tokenizer": {"type": "ByteLevel", "add_prefix_space": False, "trim_offsets": True, "use_regex": True},
@@ -104,16 +86,15 @@ def prepare_mini_tokenizer():
         "decoder": {"type": "ByteLevel", "add_prefix_space": True, "trim_offsets": True, "use_regex": True},
         "model": {
             "type": "BPE",
-            "vocab": mini_vocab,
-            "merges": [dummy_merge]
+            "vocab": vocab,
+            "merges": ["a b"]
         }
     }
     with open(os.path.join(TARGET_DIR, "tokenizer.json"), "w", encoding="utf-8") as f:
-        json.dump(mini_tokenizer_json, f, ensure_ascii=False)
+        json.dump(tokenizer_json, f, ensure_ascii=False)
     print(f"  ✓ 已保存 tokenizer.json")
 
-    print("\n✅ 迷你分词器准备完成!")
-    print(f"文件已就绪: {TARGET_DIR}")
+    print(f"\n✅ 零基分词器创建完成！")
 
 if __name__ == "__main__":
-    prepare_mini_tokenizer()
+    create_zero_tokenizer()
