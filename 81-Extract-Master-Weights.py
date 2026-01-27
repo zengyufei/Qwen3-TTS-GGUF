@@ -35,8 +35,8 @@ def extract_master_weights():
     OUTPUT_WEIGHTS = os.path.join(OUTPUT_DIR, "model.safetensors")
     OUTPUT_CONFIG = os.path.join(OUTPUT_DIR, "config.json")
 
-    print(f"--- Extracting Master Weights ---")
-    print(f"Loading original weights from: {ORIGINAL_WEIGHTS}")
+    print(f"--- 正在提取大师模型权重 ---")
+    print(f"正在从以下路径加载原始权重: {ORIGINAL_WEIGHTS}")
 
     # 1. 读取原始配置
     with open(ORIGINAL_CONFIG, "r", encoding="utf-8") as f:
@@ -62,7 +62,7 @@ def extract_master_weights():
 
     with safe_open(ORIGINAL_WEIGHTS, framework="pt", device="cpu") as f:
         total_keys = len(list(f.keys()))
-        print(f"Total keys in original model: {total_keys}")
+        print(f"原始模型中的总权重键数: {total_keys}")
 
         for key in f.keys():
             # 大师 backbone 权重: talker.model.*
@@ -73,59 +73,59 @@ def extract_master_weights():
 
                 # 特殊处理：只提取 codec_embedding (纯音频方案)
                 if key == "talker.model.codec_embedding.weight":
-                    print(f"  Extracted codec embedding: {key}, shape: {tensor.shape}")
+                    print(f"  已提取 codec embedding: {key}, 形状: {tensor.shape}")
                     # 保存为 embed_tokens (forward 中使用 self.embed_tokens)
                     master_weights["embed_tokens"] = tensor
-                    print(f"  -> Saved as embed_tokens [3072, 2048]")
+                    print(f"  -> 保存为 embed_tokens [3072, 2048]")
                     continue
 
                 # 跳过 text_embedding (纯音频方案不需要)
                 if key == "talker.model.text_embedding.weight":
-                    print(f"  Skipped text embedding: {key}, shape: {tensor.shape} (not needed for codec-only vocab)")
+                    print(f"  跳过文本 embedding: {key}, 形状: {tensor.shape} (纯音频方案不需要)")
                     continue
 
                 master_weights[new_key] = tensor
-                print(f"  Extracted: {key} -> {new_key}, shape: {tensor.shape}")
+                print(f"  已提取: {key} -> {new_key}, 形状: {tensor.shape}")
 
             # Codec head 权重: talker.codec_head.weight
             elif key == "talker.codec_head.weight":
                 codec_head_weight = f.get_tensor(key)
-                print(f"  Extracted: {key}, shape: {codec_head_weight.shape}")
+                print(f"  已提取: {key}, 形状: {codec_head_weight.shape}")
 
             # 跳过其他权重 (code_predictor, speaker_encoder 等)
             else:
-                print(f"  Skipped: {key}")
+                print(f"  已跳过: {key}")
 
-    print(f"\nExtracted {len(master_weights)} master weights")
+    print(f"\n成功提取 {len(master_weights)} 个大师模型权重")
 
     # 3. 创建 lm_head (纯音频方案：直接用 codec_head 的转置)
     if codec_head_weight is not None:
-        print(f"\n--- Creating lm_head (Codec-Only) ---")
-        print(f"Codec head: {codec_head_weight.shape}")  # [3072, 2048]
+        print(f"\n--- 正在创建 lm_head (纯音频方案) ---")
+        print(f"Codec head 形状: {codec_head_weight.shape}")  # [3072, 2048]
 
         # lm_head = codec_head.T: [3072, 2048] -> [2048, 3072]
         lm_head = codec_head_weight.t().contiguous()  # 转置后确保内存连续
-        print(f"lm_head shape: {lm_head.shape}")
-        print(f"  - Direct transpose of codec_head (no zeros, no padding)")
-        print(f"  - Vocab size: {lm_head.shape[1]} (codec tokens only)")
+        print(f"lm_head 形状: {lm_head.shape}")
+        print(f"  - 直接转置 codec_head (无需补零或填充)")
+        print(f"  - 词表大小: {lm_head.shape[1]} (仅限 codec tokens)")
 
         # 保存为 lm_head (HF 标准命名)
         master_weights["lm_head"] = lm_head
-        print(f"Added lm_head for codec-only inference")
+        print(f"已添加 lm_head 用于纯音频推理")
     else:
-        print("WARNING: codec_head not found, model will not have lm_head!")
+        print("警告: 未找到 codec_head，模型将缺少 lm_head!")
 
     # 4. 保存大师权重
     save_file(master_weights, OUTPUT_WEIGHTS)
-    print(f"Saved master weights to: {OUTPUT_WEIGHTS}")
+    print(f"大师模型权重已保存至: {OUTPUT_WEIGHTS}")
 
     # 5. 保存大师配置
     with open(OUTPUT_CONFIG, "w", encoding="utf-8") as f:
         json.dump(master_config, f, indent=2, ensure_ascii=False)
-    print(f"Saved master config to: {OUTPUT_CONFIG}")
+    print(f"大师模型配置已保存至: {OUTPUT_CONFIG}")
 
     # 6. 生成模型信息
-    print(f"\n--- Creating Metadata ---")
+    print(f"\n--- 正在创建元数据 (Metadata) ---")
     metadata = {
         "model_type": "Qwen3TTSTalkerModel",
         "architecture": "Master-only (LLM Backbone) with Codec-Only Vocab",
@@ -151,23 +151,16 @@ def extract_master_weights():
     metadata_path = os.path.join(OUTPUT_DIR, "metadata.json")
     with open(metadata_path, "w", encoding="utf-8") as f:
         json.dump(metadata, f, indent=2, ensure_ascii=False)
-    print(f"Saved metadata to: {metadata_path}")
+    print(f"元数据已保存至: {metadata_path}")
 
-    print("\n✅ Extraction complete!")
-    print(f"Master model saved to: {OUTPUT_DIR}")
+    print("\n✅ 提取完成!")
+    print(f"大师模型已保存至: {OUTPUT_DIR}")
     print(f"  - model.safetensors ({os.path.getsize(OUTPUT_WEIGHTS) / 1024**3:.2f} GB)")
-    print(f"    └─ embed_tokens [3072, 2048] (codec only)")
-    print(f"    └─ lm_head [2048, 3072] (codec only)")
-    print(f"    └─ 28 layers + norm")
+    print(f"    └─ embed_tokens [3072, 2048] (仅音频)")
+    print(f"    └─ lm_head [2048, 3072] (仅音频)")
+    print(f"    └─ 28 层 + norm")
     print(f"  - config.json (vocab_size=3072)")
     print(f"  - metadata.json")
-    print(f"\n📊 Comparison with merged vocab:")
-    print(f"  Old: embed_tokens [155008, 2048] + lm_head [2048, 155008]")
-    print(f"  New: embed_tokens [3072, 2048] + lm_head [2048, 3072]")
-    print(f"  Reduction: 98% smaller vocab, 98% fewer logits")
-    print(f"\n⚠️  Note: No tokenizer files copied (codec-only vocab doesn't need text tokenizer)")
-    print(f"Ready for GGUF conversion!")
-    print(f"Run: python 84-Convert-Master-to-GGUF.py")
 
 if __name__ == "__main__":
     extract_master_weights()

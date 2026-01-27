@@ -26,43 +26,43 @@ def verify_standard_loading():
     # 使用提取出来的大师模型路径
     MODEL_PATH = os.path.join(PROJECT_ROOT, "model", "hf")
 
-    print(f"--- Verifying Standard Model Loading (Codec-Only Vocab) ---")
-    print(f"Model path: {MODEL_PATH}")
+    print(f"--- 正在验证标准模型加载 (仅限 Codec 词表) ---")
+    print(f"模型路径: {MODEL_PATH}")
 
     # 加载配置
     config = Qwen3TTSTalkerConfig.from_pretrained(MODEL_PATH)
-    print(f"\nConfig:")
-    print(f"  vocab_size: {config.vocab_size}")
-    print(f"  _codec_only_vocab: {getattr(config, '_codec_only_vocab', False)}")
+    print(f"\n配置信息:")
+    print(f"  词表大小 (vocab_size): {config.vocab_size}")
+    print(f"  是否为纯音频词表 (_codec_only_vocab): {getattr(config, '_codec_only_vocab', False)}")
 
     # 方法1: 使用 from_pretrained (标准方法)
-    print("\nUsing from_pretrained()...")
+    print("\n正在使用 from_pretrained() 加载模型...")
     model = Qwen3TTSTalkerModel.from_pretrained(
         MODEL_PATH,
         torch_dtype=torch.bfloat16,
         device_map=device
     )
-    print("  Successfully loaded using from_pretrained()!")
+    print("  成功通过 from_pretrained() 加载模型!")
 
     model.eval()
 
     # 加载 lm_head 从 safetensors (codec-only 方案)
-    print("\nLoading lm_head from safetensors...")
+    print("\n正在从 safetensors 加载 lm_head...")
     from safetensors import safe_open
     MODEL_WEIGHTS = os.path.join(MODEL_PATH, "model.safetensors")
     with safe_open(MODEL_WEIGHTS, framework="pt", device=device) as f:
         lm_head = f.get_tensor("lm_head")
-    print(f"  lm_head shape: {lm_head.shape}")  # [2048, 3072]
+    print(f"  lm_head 形状: {lm_head.shape}")  # [2048, 3072]
 
     # 准备测试数据
-    print("\nLoading test data...")
+    print("\n正在加载测试数据...")
     inputs_embeds = torch.from_numpy(np.load("40-saved-input-embds.npy")).to(device).to(torch.bfloat16)
     expected_logits = torch.from_numpy(np.load("40-saved-input-logits.npy")).to(device).to(torch.float32)
 
-    print(f"Input shape: {inputs_embeds.shape}")
+    print(f"输入形状: {inputs_embeds.shape}")
 
     # 推理 - 直接使用 lm_head
-    print("\nRunning inference with lm_head...")
+    print("\n正在使用 lm_head 进行推理...")
     with torch.no_grad():
         attention_mask = torch.ones(inputs_embeds.shape[:2], device=device)
         outputs = model(inputs_embeds=inputs_embeds, attention_mask=attention_mask)
@@ -71,24 +71,24 @@ def verify_standard_loading():
 
         # 使用加载的 lm_head (codec-only: [2048, 3072])
         actual_logits = torch.matmul(next_hidden.to(torch.float32), lm_head.to(torch.float32))
-        print(f"Logits shape: {actual_logits.shape}")  # [1, 3072]
+        print(f"Logits 形状: {actual_logits.shape}")  # [1, 3072]
 
     # 验证结果
-    print("\n--- Results ---")
+    print("\n--- 验证结果 ---")
     actual_id = torch.argmax(actual_logits, dim=-1).item()
     expected_id = torch.argmax(expected_logits, dim=-1).item()
 
-    print(f"Predicted Token ID: {actual_id} (codec vocab: 0-3071)")
-    print(f"Expected Token ID  : {expected_id}")
+    print(f"预测的 Token ID: {actual_id} (codec 词表范围: 0-3071)")
+    print(f"期望的 Token ID: {expected_id}")
 
     if actual_id == expected_id:
-        print("\n[SUCCESS] Codec-only model works correctly!")
-        print("  - Direct codec token prediction (no offset needed)")
-        print(f"  - Predicted token: {actual_id}")
+        print("\n[成功] 纯音频模型工作正常!")
+        print("  - 直接预测 codec token (无需偏移量)")
+        print(f"  - 预测的 token: {actual_id}")
         return True
     else:
-        print("\n[FAILURE] Prediction mismatch!")
-        print(f"  Difference: {actual_id - expected_id}")
+        print("\n[失败] 预测结果不匹配!")
+        print(f"  差异: {actual_id - expected_id}")
         return False
 
 if __name__ == "__main__":

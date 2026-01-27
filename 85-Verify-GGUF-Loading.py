@@ -28,7 +28,7 @@ except ImportError:
 
 def run_inference(ctx, inputs_embeds, vocab_size, expected_token_id):
     """执行单次推理"""
-    print(f"\n--- Running Inference ---")
+    print(f"\n--- 正在运行推理 ---")
     
     # 1. 准备 Batch Setup (仿照 94 的 IMRoPE 兼容逻辑)
     # 输入 shape: [1, n_tokens, n_embd]
@@ -64,7 +64,7 @@ def run_inference(ctx, inputs_embeds, vocab_size, expected_token_id):
     nano_llama.llama_batch_free(batch)
 
     if ret != 0:
-        print(f"❌ llama_decode failed with error code {ret}")
+        print(f"❌ llama_decode 失败，错误代码 {ret}")
         return False
 
     # 3. 获取 Logits
@@ -75,19 +75,19 @@ def run_inference(ctx, inputs_embeds, vocab_size, expected_token_id):
     max_logit_idx = int(np.argmax(logits_arr))
     max_logit_val = np.max(logits_arr)
     
-    print(f"  词汇表大小: {vocab_size}")
+    print(f"  词表大小: {vocab_size}")
     print(f"  生成的 Token ID: {max_logit_idx}")
     print(f"  期望的 Token ID: {expected_token_id}")
-    print(f"  Max Logit Value:    {max_logit_val:.4f}")
+    print(f"  Max Logit 值:    {max_logit_val:.4f}")
     
     if max_logit_idx == expected_token_id:
-        print("  ✅ 匹配成功")
+        print("  ✅ 结果匹配成功")
     else:
-        print(f"  ⚠️ 匹配失败，期望 {expected_token_id}  得到 {max_logit_idx}")
+        print(f"  ⚠️ 结果不匹配，期望 {expected_token_id}，实际得到 {max_logit_idx}")
     
     # 额外的数值检查
     if vocab_size != 3072:
-        print(f"  ⚠️ 实际词汇表大小为 {vocab_size}, 期望大小为 3072 ")
+        print(f"  ⚠️ 实际词表大小为 {vocab_size}，期望大小为 3072")
     
     return True
 
@@ -102,23 +102,23 @@ def main():
     path_logits = os.path.join(PROJECT_ROOT, FILE_LOGITS)
 
     if not os.path.exists(path_gguf):
-        print(f"❌ 没有找到模型文件 {path_gguf}")
+        print(f"❌ 未找到模型文件: {path_gguf}")
         return
     
     if not os.path.exists(path_embds):
-        print(f"❌ 没有找到嵌入 {path_embds}")
+        print(f"❌ 未找到输入嵌入文件: {path_embds}")
         return
 
-    print(f"Loading model: {path_gguf}")
+    print(f"正在加载模型: {path_gguf}")
     # 加载模型 (CPU mode for verification usually suffices and is deterministic)
     model = nano_llama.load_model(path_gguf, n_gpu_layers=0)
     if not model:
-        print("❌ 模型载入失败")
+        print("❌ 模型加载失败")
         return
 
     vocab = nano_llama.llama_model_get_vocab(model)
     vocab_size = nano_llama.llama_vocab_n_tokens(vocab)
-    print(f"模型已加载 Vocab size: {vocab_size}")
+    print(f"模型已成功加载，词表大小: {vocab_size}")
 
     # 创建 Context
     ctx_params = nano_llama.llama_context_default_params()
@@ -127,13 +127,13 @@ def main():
     ctx = nano_llama.llama_init_from_model(model, ctx_params)
     
     if not ctx:
-        print("❌ 创建上下文失败")
+        print("❌ 创建推理上下文失败")
         nano_llama.llama_model_free(model)
         return
 
     # 加载输入
     embeds = np.load(path_embds)
-    print(f"成功加载嵌入 {path_embds}, shape: {embeds.shape}")
+    print(f"成功加载输入嵌入: {path_embds}, 形状: {embeds.shape}")
 
     # 动态加载官方 Logits 以获取期望结果
     if os.path.exists(path_logits):
@@ -151,9 +151,9 @@ def main():
 
         expected_token_id = int(np.argmax(expected_logit_arr))
         expected_val = float(np.max(expected_logit_arr))
-        print(f"动态计算期望结果: Token ID {expected_token_id} (Official Logit: {expected_val:.4f})")
+        print(f"基于官方数据计算的期望结果: Token ID {expected_token_id} (官方 Logit 值: {expected_val:.4f})")
     else:
-        print(f"⚠️ 未找到 Logits 文件 {path_logits}，使用默认值 1995")
+        print(f"⚠️ 未找到官方 Logits 文件 {path_logits}，使用默认期望值 1995")
         expected_token_id = 1995
 
     # 运行验证
@@ -162,7 +162,7 @@ def main():
     # 清理
     nano_llama.llama_free(ctx)
     nano_llama.llama_model_free(model)
-    print("\nDone.")
+    print("\n验证完成。")
 
 if __name__ == "__main__":
     main()

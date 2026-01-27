@@ -8,6 +8,8 @@ import os
 import shutil
 import logging
 from unittest.mock import patch
+import json
+from pathlib import Path
 
 # 1. 确保能导入 qwen3_tts_gguf 目录下的模块
 PROJECT_ROOT = os.path.dirname(os.path.abspath(__file__))
@@ -27,15 +29,47 @@ except ImportError as e:
     print(f"❌ Error importing convert_hf_to_gguf: {e}")
     sys.exit(1)
 
+
 # 3. 定义补丁函数
 def patched_get_vocab_base_pre(self, tokenizer) -> str:
     """
     Monkey Patch 替代函数。
     不进行任何哈希计算，直接返回 'qwen2'。
     """
-    print(f"💉 [Monkey Patch] Intercepted get_vocab_base_pre call.")
-    print(f"💉 [Monkey Patch] Bypassing hash check, forcing return 'qwen2'.")
+    print(f"💉 [补丁] 拦截到 get_vocab_base_pre 调用。")
+    print(f"💉 [补丁] 绕过哈希检查，强制返回 'qwen2'。")
     return "qwen2"
+
+def patched_load_hparams(dir_model: Path, is_mistral_format: bool):
+    """
+    Monkey Patch 替代函数。
+    强制从 config.json 加载参数，绕过 AutoConfig 的潜在远程代码加载和解析干扰。
+    """
+    print(f"💉 [补丁] 拦截到 load_hparams 调用。")
+    print(f"💉 [补丁] 强制从 {dir_model / 'config.json'} 加载配置。")
+    
+    if is_mistral_format:
+        with open(dir_model / "params.json", "r", encoding="utf-8") as f:
+            config = json.load(f)
+        return config
+
+    try:
+        with open(dir_model / "config.json", "r", encoding="utf-8") as f:
+            config = json.load(f)
+    except Exception as e:
+        print(f"❌ 加载配置文件失败: {e}")
+        raise
+
+    if "llm_config" in config:
+        config["text_config"] = config["llm_config"]
+    if "lm_config" in config:
+        config["text_config"] = config["lm_config"]
+    if "thinker_config" in config:
+        config["text_config"] = config["thinker_config"]["text_config"]
+    if "lfm" in config:
+        config["text_config"] = config["lfm"]
+        
+    return config
 
 # 4. 转换主逻辑
 def main():
@@ -49,7 +83,7 @@ def main():
         shutil.rmtree(TEMP_DIR)
     os.makedirs(TEMP_DIR)
 
-    print("[1/3] Preparing weights for conversion...")
+    print("[1/3] 正在为转换准备权重...")
     from safetensors import safe_open
     from safetensors.torch import save_file
     
@@ -81,14 +115,16 @@ def main():
             shutil.copy(src, dst)
 
     # [步骤 B] 应用 Monkey Patch
-    print("[2/3] Applying Monkey Patch to convert_hf_to_gguf.TextModel...")
+    print("[2/3] 正在向 convert_hf_to_gguf.TextModel 和 ModelBase 应用补丁...")
     
     # Patch TextModel 类
-    original_method = TextModel.get_vocab_base_pre
     TextModel.get_vocab_base_pre = patched_get_vocab_base_pre
+    # Patch ModelBase 类
+    from convert_hf_to_gguf import ModelBase
+    ModelBase.load_hparams = staticmethod(patched_load_hparams)
     
     # [步骤 C] 调用转换器主函数
-    print(f"[3/3] executing convert_hf_to_gguf.main()...")
+    print(f"[3/3] 正在执行 convert_hf_to_gguf.main()...")
     
     # 构造 sys.argv
     sys.argv = [
@@ -100,16 +136,16 @@ def main():
     
     try:
         convert_hf_to_gguf.main()
-        print(f"\n✅ GGUF conversion successful!")
-        print(f"Output: {GGUF_OUT}")
+        print(f"\n✅ GGUF 转换成功!")
+        print(f"输出路径: {GGUF_OUT}")
     except Exception as e:
-        print(f"\n❌ Conversion failed with python exception: {e}")
+        print(f"\n❌ 转换失败，Python 异常: {e}")
         import traceback
         traceback.print_exc()
     finally:
         # 清理
-        print("[Cleanup] Removing temp directory...")
-        # shutil.rmtree(TEMP_DIR) # Keep for debugging if needed
+        print("[清理] 正在删除临时目录...")
+        # shutil.rmtree(TEMP_DIR) # 如需调试可取消注释
 
 if __name__ == "__main__":
     main()

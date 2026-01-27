@@ -13,12 +13,12 @@ def prepare_mini_tokenizer():
     SOURCE_MODEL_DIR = os.path.join(PROJECT_ROOT, "Qwen3-TTS-12Hz-1.7B-CustomVoice")
     TARGET_DIR = os.path.join(PROJECT_ROOT, "model", "hf")
     
-    print(f"--- Preparing Mini Tokenizer (3072 Vocab) ---")
-    print(f"Source: {SOURCE_MODEL_DIR}")
-    print(f"Target: {TARGET_DIR}")
+    print(f"--- 正在准备迷你分词器 (3072 词表) ---")
+    print(f"来源目录: {SOURCE_MODEL_DIR}")
+    print(f"目标目录: {TARGET_DIR}")
 
     # 1. 处理 vocab.json，构造极限大小 (100) 的词表
-    print("[1/4] Constructing mini_vocab (limit 100)...")
+    print("[1/4] 正在构造迷你词表 (限制为 100 个字符)...")
     vocab_path = os.path.join(SOURCE_MODEL_DIR, "vocab.json")
     with open(vocab_path, "r", encoding="utf-8") as f:
         full_vocab = json.load(f)
@@ -49,18 +49,18 @@ def prepare_mini_tokenizer():
 
     with open(os.path.join(TARGET_DIR, "vocab.json"), "w", encoding="utf-8") as f:
         json.dump(mini_vocab, f, ensure_ascii=False)
-    print(f"  ✓ Saved vocab.json (size: {len(mini_vocab)})")
+    print(f"  ✓ 已保存 vocab.json (大小: {len(mini_vocab)})")
 
     # 2. 处理 merges.txt
-    print(f"[2/4] Creating dummy merges.txt using 'a' and 'b' -> 'ab'...")
+    print(f"[2/4] 正在使用 'a' 和 'b' -> 'ab' 创建虚拟 merges.txt...")
     dummy_merge = "a b"
     with open(os.path.join(TARGET_DIR, "merges.txt"), "w", encoding="utf-8") as f:
         f.write("#version: 0.2\n")
         f.write(f"{dummy_merge}\n")
-    print(f"  ✓ Saved merges.txt")
+    print(f"  ✓ 已保存 merges.txt")
 
     # 3. 处理 tokenizer_config.json
-    print("[3/4] Customizing tokenizer_config.json...")
+    print("[3/4] 正在自定义 tokenizer_config.json...")
     config_path = os.path.join(SOURCE_MODEL_DIR, "tokenizer_config.json")
     with open(config_path, "r", encoding="utf-8") as f:
         t_config = json.load(f)
@@ -87,10 +87,10 @@ def prepare_mini_tokenizer():
     
     with open(os.path.join(TARGET_DIR, "tokenizer_config.json"), "w", encoding="utf-8") as f:
         json.dump(t_config, f, indent=2, ensure_ascii=False)
-    print(f"  ✓ Saved tokenizer_config.json")
+    print(f"  ✓ 已保存 tokenizer_config.json")
 
     # 4. 重新生成 tokenizer.json
-    print("[4/4] Creating minimal tokenizer.json...")
+    print("[4/4] 正在创建极限精简的 tokenizer.json...")
     mini_tokenizer_json = {
         "version": "1.0",
         "truncation": None,
@@ -110,10 +110,10 @@ def prepare_mini_tokenizer():
     }
     with open(os.path.join(TARGET_DIR, "tokenizer.json"), "w", encoding="utf-8") as f:
         json.dump(mini_tokenizer_json, f, ensure_ascii=False)
-    print(f"  ✓ Saved tokenizer.json")
+    print(f"  ✓ 已保存 tokenizer.json")
 
-    print("\n✅ Mini Tokenizer preparation complete!")
-    print(f"Files ready in: {TARGET_DIR}")
+    print("\n✅ 迷你分词器准备完成!")
+    print(f"文件已就绪: {TARGET_DIR}")
 
 if __name__ == "__main__":
     prepare_mini_tokenizer()
