@@ -167,6 +167,7 @@
   "_original_model_type": "qwen3_tts_talker",
   "_extracted_from": "Qwen3-TTS-12Hz-1.7B-CustomVoice",
   "_actual_model_type": "qwen3_tts_talker",
+  "_codec_only_vocab": true,
   "architectures": [
     "Qwen3VLForConditionalGeneration"
   ]
