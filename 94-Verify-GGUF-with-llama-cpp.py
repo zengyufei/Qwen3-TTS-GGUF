@@ -15,13 +15,10 @@ import numpy as np
 import ctypes
 import time
 
-# 添加 fun_asr_gguf 模块路径
-PROJECT_ROOT = os.path.dirname(os.path.abspath(__file__))
-sys.path.insert(0, os.path.join(PROJECT_ROOT, "fun_asr_gguf"))
+os.environ["VK_ICD_FILENAMES"] = "none"       # 禁止 Vulkan
+PROJECT_ROOT = '.'
 
-# 导入整个模块，而不是单独导入函数
-# 这是因为 llama_model_get_vocab 等函数是在 init_llama_lib() 中动态初始化的
-import fun_asr_gguf.nano_llama as nano_llama
+import qwen3_tts_gguf.nano_llama as nano_llama
 
 
 def verify_gguf_with_embeddings():
