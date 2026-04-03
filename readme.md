@@ -61,7 +61,7 @@ python 34-Quantize-Predictor-GGUF.py    # 量化为 q8_0，这是推理引擎默
     
     3、全部导出完毕，执行 一键test.bat
     
-    
+    4、不用下载  llama.cpp，我已经集成了
     
     
 ---
