@@ -8,9 +8,11 @@ librosa
 soundfile
 sox
 onnx
+onnxscript
 onnxruntime-directml
 einops
 pydub
+av
 sentencepiece
 
 
@@ -20,3 +22,5 @@ soundfile
 gguf
 numpy
 scipy
+fastapi
+uvicorn

@@ -184,7 +184,8 @@ class DecoderProxy:
         self.decoder_idle.wait(timeout=timeout)
 
     def decode(self, input: Union[np.ndarray, TTSResult], task_id="default", is_final: bool = False, 
-               stream: bool = False, state: Optional["DecoderState"] = None) -> np.ndarray:
+               stream: bool = False, state: Optional["DecoderState"] = None,
+               playback: bool = True) -> np.ndarray:
         """
         累积式跨进程解码。
         
@@ -215,7 +216,7 @@ class DecoderProxy:
             self.events[task_id].clear()
             
         if stream:
-            self.streaming_results[task_id] = True
+            self.streaming_results[task_id] = playback
             
         # 追踪活跃任务
         if is_final or not stream:

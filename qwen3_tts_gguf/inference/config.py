@@ -28,3 +28,4 @@ class TTSConfig:
     # --- 全局生成控制 ---
     max_steps: int = 300             # 最大生成步数。决定了单次合成最长的持续时间。
     streaming: bool = True           # 是否启用流式推理。
+    playback: bool = True            # 仅在 streaming=True 时生效。控制流式推理时是否自动本机播放。

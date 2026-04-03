@@ -219,7 +219,7 @@ class TTSStream:
             # 解码 chunk
             state = self.voice.final_state if (len(all_codes) == chunk_size and self.voice and self.voice.final_state) else None
             self.decoder.decode(np.array(chunk_buffer), task_id=current_task_id, 
-                                is_final=False, stream=streaming, state=state)
+                                is_final=False, stream=streaming, state=state, playback=cfg.playback)
             
             # 清空 chunk_buffer 以积累下一批
             chunk_buffer = []
@@ -232,7 +232,7 @@ class TTSStream:
         state = self.voice.final_state if (not streaming and self.voice and self.voice.final_state) else None
         decode_result = self.decoder.decode(
             np.array(chunk_buffer) if chunk_buffer else np.zeros((0, 16)), 
-            task_id=current_task_id, is_final=True, stream=streaming, state=state
+            task_id=current_task_id, is_final=True, stream=streaming, state=state, playback=cfg.playback
         )
         # 记录 decoder 的每一个 chunk 的耗时
         timing.decoder_compute_times = decode_result.chunk_compute_times

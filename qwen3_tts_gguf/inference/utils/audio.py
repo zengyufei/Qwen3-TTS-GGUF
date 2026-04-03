@@ -1,23 +1,39 @@
 """
-audio.py - 音频预处理工具类
-职责：使用 ffmpeg 直接读取音频，支持所有格式（mp3/m4a/opus 等）。
+audio.py - audio preprocessing helpers
+Primary strategy:
+1. Use soundfile for formats it handles well.
+2. Use PyAV for MP4/M4A/AAC and other container-based inputs.
+This avoids depending on an external ffmpeg executable.
 """
-import os
+
 import math
-import shutil
-import subprocess
+import os
+from pathlib import Path
+
 import numpy as np
 import soundfile as sf
-from pathlib import Path
-from .. import logger
+from scipy.signal import resample_poly as scipy_resample_poly
+
+try:
+    import av
+except ImportError:  # pragma: no cover - optional dependency at import time
+    av = None
+
+
+def is_mp4_family_container(audio_path):
+    """
+    Detect ISO BMFF / MP4-family container by file header.
+    Some files may use a .mp3 extension while actually being M4A/AAC containers.
+    """
+    try:
+        with open(audio_path, "rb") as f:
+            header = f.read(32)
+    except OSError:
+        return False
+    return len(header) >= 12 and header[4:8] == b"ftyp"
 
 
 def numpy_resample_poly(x, up, down, window_size=10):
-    """
-    纯 numpy 实现的 resample_poly
-    算法精准复刻 scipy.signal.resample_poly，与 scipy 相似度达 0.99999998
-    """
-    # 1. 约分
     g = math.gcd(up, down)
     up //= g
     down //= g
@@ -25,124 +41,154 @@ def numpy_resample_poly(x, up, down, window_size=10):
     if up == down:
         return x.copy()
 
-    # 2. 设计 FIR 滤波器 (与 scipy.signal.firwin 对齐)
     max_rate = max(up, down)
-    f_c = 1.0 / max_rate  
+    f_c = 1.0 / max_rate
     half_len = window_size * max_rate
     n_taps = 2 * half_len + 1
-    
+
     t = np.arange(n_taps) - half_len
     h = np.sinc(f_c * t)
-    
-    # 使用 Kaiser 窗 (beta=5.0)
-    # np.i0 是修饰过的第一类修正贝塞尔函数，与 scipy.special.i0 一致
+
     beta = 5.0
-    kaiser_win = np.i0(beta * np.sqrt(1 - (2 * t / (n_taps - 1))**2)) / np.i0(beta)
+    kaiser_win = np.i0(beta * np.sqrt(1 - (2 * t / (n_taps - 1)) ** 2)) / np.i0(beta)
     h = h * kaiser_win
     h = h * (up / np.sum(h))
 
-    # 3. 多相滤波 (复刻 upfirdn 逻辑)
     length_in = len(x)
     length_out = int(math.ceil(length_in * up / down))
-    
+
     x_up = np.zeros(length_in * up + n_taps, dtype=np.float32)
-    x_up[:length_in * up:up] = x
-    
-    y_full = np.convolve(x_up, h, mode='full')
-    
+    x_up[: length_in * up : up] = x
+
+    y_full = np.convolve(x_up, h, mode="full")
+
     offset = (n_taps - 1) // 2
     y = y_full[offset : offset + length_in * up : down]
-    
+
     return y[:length_out].astype(np.float32)
 
 
 def resample_audio(audio, sr, target_sr):
-    """音频重采样封装"""
     if sr == target_sr:
         return audio
-    return numpy_resample_poly(audio, target_sr, sr)
+    return scipy_resample_poly(audio, target_sr, sr).astype(np.float32, copy=False)
 
 
 def load_audio_numpy(audio_path, sample_rate=24000, start_second=None, duration=None):
-    """使用 soundfile + numpy 重采样读取音频"""
     info = sf.info(audio_path)
     sr = info.samplerate
-    
-    # 获取偏移量
+
     start_frame = int(start_second * sr) if start_second is not None else 0
     frames = int(duration * sr) if duration is not None else -1
-    
-    audio, sr = sf.read(audio_path, start=start_frame, frames=frames, dtype='float32')
-    
-    # 转单声道
+
+    audio, sr = sf.read(audio_path, start=start_frame, frames=frames, dtype="float32")
+
     if audio.ndim > 1:
         audio = audio.mean(axis=1)
-        
-    # 高质量重采样
+
     if sr != sample_rate:
         audio = resample_audio(audio, sr, sample_rate)
-        
-    return audio.astype(np.float32)
+
+    return audio.astype(np.float32, copy=False)
 
 
-def check_ffmpeg():
-    """检测系统是否安装 ffmpeg"""
-    return shutil.which('ffmpeg') is not None
+def load_audio_pyav(audio_path, sample_rate=24000, start_second=None, duration=None):
+    if av is None:
+        raise RuntimeError(
+            "PyAV is required to decode this audio file. Install it with `pip install av`."
+        )
 
+    audio_chunks = []
+    source_rate = None
 
-def load_audio_ffmpeg(audio_path, sample_rate=24000, start_second=None, duration=None):
-    """使用 ffmpeg 直接读取音频"""
-    if not check_ffmpeg():
-        raise RuntimeError("系统未发现 ffmpeg。请先安装 ffmpeg 并将其添加到系统环境变量 PATH 中。")
+    container = av.open(str(audio_path))
+    try:
+        audio_stream = next((stream for stream in container.streams if stream.type == "audio"), None)
+        if audio_stream is None:
+            raise RuntimeError(f"No audio stream found in file: {audio_path}")
 
-    cmd = ['ffmpeg', '-y', '-i', str(audio_path)]
+        resampler = av.AudioResampler(format="fltp", layout="mono", rate=sample_rate)
 
-    if start_second is not None:
-        cmd.extend(['-ss', str(start_second)])
-    if duration is not None:
-        cmd.extend(['-t', str(duration)])
+        if start_second is not None:
+            try:
+                container.seek(int(start_second * av.time_base), any_frame=False, backward=True)
+            except Exception:
+                pass
 
-    cmd.extend([
-        '-ar', str(sample_rate),
-        '-ac', '1',
-        '-f', 'f32le',
-        'pipe:1'
-    ])
+        end_second = None if duration is None else (start_second or 0.0) + duration
 
-    process = subprocess.Popen(
-        cmd,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        bufsize=0
-    )
+        for frame in container.decode(audio_stream):
+            source_rate = int(frame.sample_rate or audio_stream.rate or sample_rate)
+            frame_start = float(frame.time or 0.0)
+            frame_duration = frame.samples / float(source_rate)
+            frame_end = frame_start + frame_duration
 
-    raw_bytes, stderr = process.communicate()
+            if start_second is not None and frame_end <= start_second:
+                continue
+            if end_second is not None and frame_start >= end_second:
+                break
 
-    if process.returncode != 0:
-        error_msg = stderr.decode('utf-8', errors='ignore')
-        raise RuntimeError(f"ffmpeg 处理音频失败: {error_msg}")
+            frame = resampler.resample(frame)
+            if frame is None:
+                continue
+            if isinstance(frame, list):
+                resampled_frames = frame
+            else:
+                resampled_frames = [frame]
 
-    return np.frombuffer(raw_bytes, dtype=np.float32)
+            data_list = []
+            for item in resampled_frames:
+                data = item.to_ndarray()
+                if data.ndim == 1:
+                    mono = data.astype(np.float32, copy=False)
+                else:
+                    mono = data.astype(np.float32, copy=False).mean(axis=0)
+                data_list.append(mono)
 
+            if not data_list:
+                continue
+
+            mono = np.concatenate(data_list).astype(np.float32, copy=False)
+            frame_rate = sample_rate
+            frame_duration = mono.shape[0] / float(frame_rate)
+            frame_end = frame_start + frame_duration
+
+            if start_second is not None and frame_start < start_second:
+                trim_start = int(round((start_second - frame_start) * frame_rate))
+                mono = mono[max(0, trim_start) :]
+
+            if end_second is not None and frame_end > end_second:
+                keep = int(round((end_second - frame_start) * frame_rate))
+                mono = mono[: max(0, keep)]
+
+            if mono.size:
+                audio_chunks.append(mono)
+    finally:
+        container.close()
+
+    if not audio_chunks:
+        return np.array([], dtype=np.float32)
+
+    audio = np.concatenate(audio_chunks).astype(np.float32, copy=False)
+    return audio.astype(np.float32, copy=False)
 
 
 def load_audio(audio_path, sample_rate=24000, start_second=None, duration=None):
     """
-    加载音频文件的主入口。
-    根据后缀名判断读取方式：
-    - soundfile 支持: .wav, .flac, .ogg, .mp3
-    - 其他 ffmpeg fallback: .m4a, .mp4, .opus, .wmv 等
+    Main audio loader entry.
+    - soundfile for stable native formats
+    - PyAV for MP4/M4A/AAC and other container-based files
     """
     if not os.path.exists(audio_path):
-        raise FileNotFoundError(f"音频文件不存在: {audio_path}")
-        
-    # 获取后缀名
+        raise FileNotFoundError(f"Audio file does not exist: {audio_path}")
+
     ext = Path(audio_path).suffix.lower()
-    
-    # 定义 soundfile 可以稳定处理的格式
-    SF_FORMATS = {'.wav', '.flac', '.ogg', '.mp3'}
-    
-    if ext in SF_FORMATS:
+
+    if is_mp4_family_container(audio_path):
+        return load_audio_pyav(audio_path, sample_rate, start_second, duration)
+
+    soundfile_formats = {".wav", ".flac", ".ogg", ".mp3"}
+    if ext in soundfile_formats:
         return load_audio_numpy(audio_path, sample_rate, start_second, duration)
-    else:
-        return load_audio_ffmpeg(audio_path, sample_rate, start_second, duration)
+
+    return load_audio_pyav(audio_path, sample_rate, start_second, duration)

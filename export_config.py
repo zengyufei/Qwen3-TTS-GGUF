@@ -23,11 +23,11 @@ class Models:
         dest_home / 'model-design'
     )
     base_small       = ModelConfig(
-        model_home / 'Qwen3-TTS-12Hz-0.6B-Base', 
+        model_home / 'Qwen3-TTS-12Hz-0___6B-Base', 
         dest_home / 'model-base-small'
     )
     custom_small       = ModelConfig(
-        model_home / 'Qwen3-TTS-12Hz-0.6B-CustomVoice', 
+        model_home / 'Qwen3-TTS-12Hz-0___6B-CustomVoice', 
         dest_home / 'model-custom-small'
     )
 
