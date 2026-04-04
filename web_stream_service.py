@@ -16,20 +16,42 @@ from pydantic import BaseModel, Field
 from qwen3_tts_gguf.inference import TTSEngine, TTSConfig
 
 SAMPLE_RATE = 24000
+
+# Base model directory. Change this when switching to another GGUF/asset pack.
 MODEL_DIR = os.environ.get("QWEN_TTS_MODEL_DIR", "model-base-small")
+
+# Primary voice directory for precomputed elaborate JSON voices.
 VOICE_DIR = Path(os.environ.get("QWEN_TTS_VOICE_DIR", os.path.join("output", "elaborate")))
+
+# Fallback voice directory for raw reference audio voices plus same-name .txt transcripts.
 EXTRA_VOICE_DIR = Path(os.environ.get("QWEN_TTS_EXTRA_VOICE_DIR", os.path.join("output", "voices")))
+
+# Service default voice. Used when the request does not provide a voice name.
 DEFAULT_VOICE = os.environ.get("QWEN_TTS_VOICE", "Vivian")
+
+# ONNX execution provider used by the decoder worker.
+# Typical values: CUDA / CPU.
 ONNX_PROVIDER = os.environ.get("QWEN_TTS_ONNX_PROVIDER", "CUDA")
-MAX_CONCURRENT_STREAMS = int(os.environ.get("QWEN_TTS_STREAM_WORKERS", "2"))
-CACHE_DEFAULT_VOICE = os.environ.get("QWEN_TTS_CACHE_DEFAULT_VOICE", "0") == "1"
+
+# Number of queue workers. 1 = strict serial generation. 2+ = FIFO queue with limited parallelism.
+# Use 1 for maximum stability. Use 2+ only when you really need concurrent requests.
+MAX_CONCURRENT_STREAMS = int(os.environ.get("QWEN_TTS_STREAM_WORKERS", "1"))
+
+# Run one real synthesis pass during startup so the first user request is less cold.
+# Keep enabled for production-like use. Disable only if you want the fastest startup or are debugging init flow.
+STARTUP_WARMUP = os.environ.get("QWEN_TTS_STARTUP_WARMUP", "1") == "1"
+
+# Warmup text used by the startup synthesis pass. Defaults to "hi".
+STARTUP_WARMUP_TEXT = os.environ.get("QWEN_TTS_STARTUP_WARMUP_TEXT", "hi")
+
+# Simple shared token for /api/stream. If set, requests with a different token return 404.
+API_STREAM_TOKEN = os.environ.get("QWEN_TTS_STREAM_TOKEN", "zengleqi")
 
 engine: Optional[TTSEngine] = None
 voice_map: dict[str, "VoiceItem"] = {}
 request_queue: "queue.Queue[Optional[StreamTask]]"
 worker_threads: list[threading.Thread] = []
 default_voice_result = None
-worker_default_streams = []
 service_task_counter = 0
 service_task_counter_lock = threading.Lock()
 decoder_play_q_original = None
@@ -58,6 +80,7 @@ class StreamRequest(BaseModel):
     text: str = Field(..., min_length=1, description="待合成的文本")
     seed: float = Field(1.0, gt=0, description="语速倍率，1.0 为正常速度")
     voice: Optional[str] = Field(None, description="音色名称")
+    token: str = Field("", description="接口访问令牌")
 
 
 class _SilentPlayQueue:
@@ -163,60 +186,107 @@ def release_decoder_silence():
             engine.decoder.play_q = decoder_play_q_original
 
 
+def load_voice_into_stream(stream, voice: VoiceItem) -> bool:
+    if voice.name == DEFAULT_VOICE and default_voice_result is not None:
+        return bool(stream.set_voice(copy.deepcopy(default_voice_result)))
+    if voice.kind == "audio":
+        if not voice.ref_text:
+            raise RuntimeError(f"Missing reference text for audio voice: {voice.name}")
+        return bool(stream.set_voice(str(voice.path), voice.ref_text))
+    return bool(stream.set_voice(str(voice.path)))
+
+
+def build_stream_config() -> TTSConfig:
+    return TTSConfig(
+        max_steps=400,
+        temperature=0.85,
+        sub_temperature=0.85,
+        seed=65,
+        sub_seed=65,
+        streaming=True,
+        playback=False,
+    )
+
+
+def create_bound_stream(voice: VoiceItem, purpose: str):
+    if engine is None:
+        raise RuntimeError("TTS engine is not initialized.")
+    stream = engine.create_stream()
+    if stream is None:
+        raise RuntimeError(f"Unable to create stream for {purpose}.")
+    voice_loaded = load_voice_into_stream(stream, voice)
+    if not voice_loaded:
+        raise RuntimeError(f"Failed to bind voice anchor for {purpose}: {voice.path}")
+    return stream
+
+
+def prepare_default_voice_result(voice: VoiceItem):
+    if engine is None:
+        raise RuntimeError("TTS engine is not initialized.")
+    stream = engine.create_stream()
+    if stream is None:
+        raise RuntimeError("Unable to create default voice warmup stream.")
+    try:
+        if voice.kind == "audio":
+            if not voice.ref_text:
+                raise RuntimeError(f"Missing reference text for default voice: {voice.name}")
+            result = stream.set_voice(str(voice.path), voice.ref_text)
+        else:
+            result = stream.set_voice(str(voice.path))
+        if not result:
+            raise RuntimeError(f"Failed to prepare default voice: {voice.path}")
+        return result
+    finally:
+        try:
+            stream.shutdown()
+        except Exception:
+            pass
+
+
+def run_startup_warmup() -> None:
+    if engine is None:
+        raise RuntimeError("TTS engine is not initialized.")
+
+    warmup_text = STARTUP_WARMUP_TEXT.strip() or "hi"
+    warmup_voice = resolve_voice(DEFAULT_VOICE)
+    warmup_stream = create_bound_stream(warmup_voice, "startup warmup")
+
+    config = build_stream_config()
+    started_at = time.perf_counter()
+    print(
+        f"[web_stream_service] startup warmup start text={warmup_text!r} voice={warmup_voice.name}",
+        flush=True,
+    )
+    try:
+        result = warmup_stream.clone(text=warmup_text, language="Chinese", config=config)
+        if result is None or result.audio is None or len(result.audio) == 0:
+            raise RuntimeError("Startup warmup returned no audio.")
+        print(
+            f"[web_stream_service] startup warmup done total_ms={(time.perf_counter() - started_at) * 1000.0:.1f}",
+            flush=True,
+        )
+    finally:
+        try:
+            warmup_stream.shutdown()
+        except Exception:
+            pass
+
+
 def process_stream_task(task: StreamTask, worker_index: int) -> None:
     if engine is None:
         raise RuntimeError("TTS engine is not initialized.")
 
     total_started_at = time.perf_counter()
-    using_cached_default_stream = (
-        CACHE_DEFAULT_VOICE
-        and task.voice.name == DEFAULT_VOICE
-        and worker_index < len(worker_default_streams)
-        and worker_default_streams[worker_index] is not None
-    )
     print(
-        f"[web_stream_service] task start worker={worker_index} voice={task.voice.name} cached_stream={using_cached_default_stream}",
+        f"[web_stream_service] task start worker={worker_index} voice={task.voice.name}",
         flush=True,
     )
 
     stream_started_at = time.perf_counter()
-    if using_cached_default_stream:
-        stream = worker_default_streams[worker_index]
-    else:
-        stream = engine.create_stream()
-        if stream is None:
-            raise RuntimeError("Unable to create TTS stream.")
-    log_stream_timing("stream ready", stream_started_at)
+    stream = create_bound_stream(task.voice, f"worker {worker_index} request")
+    log_stream_timing("request stream ready", stream_started_at)
 
-    set_voice_started_at = time.perf_counter()
-    if using_cached_default_stream:
-        voice_loaded = True
-    elif CACHE_DEFAULT_VOICE and task.voice.name == DEFAULT_VOICE and default_voice_result is not None:
-        voice_loaded = stream.set_voice(copy.deepcopy(default_voice_result))
-    else:
-        if task.voice.kind == "audio":
-            if not task.voice.ref_text:
-                raise RuntimeError(f"Missing reference text for audio voice: {task.voice.name}")
-            voice_loaded = stream.set_voice(str(task.voice.path), task.voice.ref_text)
-        else:
-            voice_loaded = stream.set_voice(str(task.voice.path))
-    log_stream_timing(
-        f"set_voice done ok={bool(voice_loaded)} mode={'fixed-stream' if using_cached_default_stream else 'dynamic'}",
-        set_voice_started_at,
-    )
-
-    if not voice_loaded:
-        raise RuntimeError(f"Failed to load voice anchor: {task.voice.path}")
-
-    config = TTSConfig(
-        max_steps=400,
-        temperature=0.6,
-        sub_temperature=0.6,
-        seed=42,
-        sub_seed=45,
-        streaming=True,
-        playback=False,
-    )
+    config = build_stream_config()
     sample_rate = max(1000, int(round(SAMPLE_RATE * task.speed)))
     task_id = next_service_task_id(stream)
     print(
@@ -335,7 +405,7 @@ def chunk_generator(task: StreamTask):
 
 @asynccontextmanager
 async def lifespan(_: FastAPI):
-    global decoder_play_q_original, default_voice_result, engine, voice_map, request_queue, worker_default_streams, worker_threads
+    global decoder_play_q_original, default_voice_result, engine, voice_map, request_queue, worker_threads
 
     if not os.path.isdir(MODEL_DIR):
         raise RuntimeError(f"Model directory not found: {os.path.abspath(MODEL_DIR)}")
@@ -353,51 +423,22 @@ async def lifespan(_: FastAPI):
         raise RuntimeError("TTS engine failed to initialize.")
 
     print(
-        f"[web_stream_service] startup workers={MAX_CONCURRENT_STREAMS} cache_default_voice={CACHE_DEFAULT_VOICE}",
+        f"[web_stream_service] startup workers={MAX_CONCURRENT_STREAMS} per_request_stream=True startup_warmup={STARTUP_WARMUP} default_voice={DEFAULT_VOICE}",
         flush=True,
     )
     decoder_play_q_original = engine.decoder.play_q
 
     default_voice_result = None
-    worker_default_streams = []
-    if CACHE_DEFAULT_VOICE:
-        default_voice_item = resolve_voice(DEFAULT_VOICE)
-        warmup_stream = engine.create_stream()
-        if warmup_stream is None:
-            raise RuntimeError("Unable to create warmup stream for default voice cache.")
+    default_voice_item = resolve_voice(DEFAULT_VOICE)
+    default_voice_result = prepare_default_voice_result(default_voice_item)
 
-        if default_voice_item.kind == "audio":
-            if not default_voice_item.ref_text:
-                raise RuntimeError(f"Missing reference text for default voice: {default_voice_item.name}")
-            default_voice_result = warmup_stream.set_voice(
-                str(default_voice_item.path),
-                default_voice_item.ref_text,
-            )
-        else:
-            default_voice_result = warmup_stream.set_voice(str(default_voice_item.path))
+    print(
+        f"[web_stream_service] default voice ready name={DEFAULT_VOICE}",
+        flush=True,
+    )
 
-        if not default_voice_result:
-            raise RuntimeError(f"Failed to warm up default voice cache: {default_voice_item.path}")
-
-        print(
-            f"[web_stream_service] default voice cache ready name={DEFAULT_VOICE}",
-            flush=True,
-        )
-
-        worker_default_streams = []
-        for idx in range(MAX_CONCURRENT_STREAMS):
-            worker_stream = engine.create_stream()
-            if worker_stream is None:
-                raise RuntimeError(f"Unable to create cached stream for worker {idx}.")
-            voice_loaded = worker_stream.set_voice(copy.deepcopy(default_voice_result))
-            if not voice_loaded:
-                raise RuntimeError(f"Failed to bind cached default voice to worker stream {idx}.")
-            worker_default_streams.append(worker_stream)
-
-        print(
-            f"[web_stream_service] worker default streams ready count={len(worker_default_streams)} name={DEFAULT_VOICE}",
-            flush=True,
-        )
+    if STARTUP_WARMUP:
+        run_startup_warmup()
 
     request_queue = queue.Queue()
     worker_threads = []
@@ -417,7 +458,6 @@ async def lifespan(_: FastAPI):
         engine.shutdown()
         engine = None
     default_voice_result = None
-    worker_default_streams = []
     decoder_play_q_original = None
 
 
@@ -426,6 +466,9 @@ app = FastAPI(title="Qwen3-TTS Stream Service", lifespan=lifespan)
 
 @app.post("/api/stream")
 async def api_stream(request: StreamRequest):
+    if API_STREAM_TOKEN and request.token != API_STREAM_TOKEN:
+        raise HTTPException(status_code=404, detail="Not Found")
+
     request_started_at = time.perf_counter()
     try:
         voice = resolve_voice(request.voice)
@@ -440,7 +483,7 @@ async def api_stream(request: StreamRequest):
     )
     request_queue.put(task)
     print(
-        f"[web_stream_service] enqueue voice={voice.name} queue_size={request_queue.qsize()} total_ms={(time.perf_counter() - request_started_at) * 1000.0:.1f}",
+        f"[web_stream_service] enqueue voice={voice.name} text={request.text!r} queue_size={request_queue.qsize()} total_ms={(time.perf_counter() - request_started_at) * 1000.0:.1f}",
         flush=True,
     )
 
@@ -448,11 +491,7 @@ async def api_stream(request: StreamRequest):
         content=chunk_generator(task),
         media_type="audio/wav",
         headers={
-            "Content-Type": "audio/wav",
-            "X-Voice-Name": voice.name,
-            "X-Voice-Cache": "default" if CACHE_DEFAULT_VOICE and voice.name == DEFAULT_VOICE else "none",
-            "X-Queue-Mode": f"fifo-{MAX_CONCURRENT_STREAMS}",
-            "Cache-Control": "no-store",
+            "Content-Type": "audio/wav"
         },
     )
 
