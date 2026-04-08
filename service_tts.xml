@@ -1,0 +1,28 @@
+<service>
+    <id>service_tts</id>
+    <name>service_tts</name>
+    <description>启动一个 tts</description>
+    
+    <!-- 工作目录（重要！Nginx 依赖相对路径找 conf、logs 等） -->
+    <workingdirectory>%BASE%</workingdirectory>
+    
+    <executable>venv\Scripts\python.exe</executable>
+    
+    <arguments>web.py</arguments>
+    
+    <env name="PYTHONUTF8" value="1" />
+    <env name="PYTHONIOENCODING" value="utf-8" />
+    
+    <startmode>Automatic</startmode>
+        
+    <!-- 显式使用 LocalSystem 账户（具备最高权限，可加载驱动） -->
+    <serviceaccount>
+        <user>LocalSystem</user>
+    </serviceaccount>
+
+    <logpath>.\log</logpath>
+    <log mode="roll-by-size">
+        <sizeThreshold>51200</sizeThreshold>
+        <keepFiles>8</keepFiles>
+    </log>
+</service>
