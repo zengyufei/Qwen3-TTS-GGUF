@@ -63,7 +63,261 @@ python 34-Quantize-Predictor-GGUF.py    # 量化为 q8_0，这是推理引擎默
     
     4、不用下载  llama.cpp，我已经集成了
     
-    
+
+## 4、性能
+
+### RTF: 0.23~0.26 左右
+
+#### 以下是运行日志示例：
+
+```
+INFO:     Started server process [24612]
+INFO:     Waiting for application startup.
+📦 [Engine] 资产与词表加载完成 (耗时: 0.44s)
+🎤 [Engine] 编码器加载完成 (耗时: 0.60s)
+⏳ [Engine] 正在拉起子进程解码器...
+🧠 [Engine] GGUF 推理后端就绪 (耗时: 1.24s)
+🔊 [DecoderWorker] 已就绪 (Provider: CUDAExecutionProvider)
+✅ [Engine] 解码器就绪: Decoder True | Speaker True (总并行初始化耗时: 5.00s)
+🚀 [Engine] 引擎全链路初始化完成! 总耗时: 6.04s
+[web] startup workers=1 startup_warmup=True default_voice=Vivian output_gain=1.5 chunk_size=24 poll_s=0.005 ort_intra=0 ort_inter=0
+[web] default voice ready name=Vivian
+[web] startup warmup start text='hi' voice=Vivian
+----------------------------------------
+性能分析报告 (音频长度: 0.72s)
+  1. Prompt:    0.17s
+  2. Prefill:   0.11s
+  3. Generate:  0.41s (Talker: 0.06s, Predictor: 0.35s)
+  4. Decode:    0.11s
+  5. Latency:   0.63s (Generate: 0.52s, Decode: 0.11s)
+----------------------------------------
+核心总耗时: 0.69s | RTF (Core): 0.95
+[web] startup warmup done total_ms=820.9
+[web] worker bound streams ready count=1 voice=Vivian
+[web] worker ready index=0
+INFO:     Application startup complete.
+INFO:     Uvicorn running on http://0.0.0.0:8210 (Press CTRL+C to quit)
+
+
+[web] /api/tts request method=POST content_type='application/json' query={} form={} json={'text': '\u3000\u3000目送着刘令萍和于文走远，张肃脸上的坏笑逐渐收敛，拿出对讲机联络吴大强，让他监督好哨岗的执勤人员，这件事万万不能马虎，必须严肃对待，亲自突击检查也是有必要的！', 'token': 'mytoken', 'seed': 1} fallback_form={}
+[web] enqueue voice=Vivian text='目送着刘令萍和于文走远，张肃脸上的坏笑逐渐收敛，拿出对讲机联络吴大强，让他监督好哨岗的执勤人员，这件事万万不能马虎，必须严肃对待，亲自突击检查也是有必要的！' queue_size=1 total_ms=0.1
+[web] task start worker=0 voice=Vivian wait_ms=0.1
+[web] worker stream reuse index=0 voice=Vivian
+[web] request stream ready elapsed_ms=0.1
+[web] clone start worker=0 task_id=task_0 sample_rate=24000
+INFO:     127.0.0.1:64618 - "POST /api/tts HTTP/1.1" 200 OK
+[web] clone finished(non-stream) elapsed_ms=4564.5
+----------------------------------------
+性能分析报告 (音频长度: 15.84s)
+  1. Prompt:    0.02s
+  2. Prefill:   0.14s
+  3. Generate:  4.03s (Talker: 0.54s, Predictor: 3.49s)
+  4. Decode:    0.30s
+  5. Latency:   4.49s (Generate: 4.19s, Decode: 0.30s)
+----------------------------------------
+核心总耗时: 4.19s | RTF (Core): 0.26
+[web] task finished worker=0 task_id=task_0 run_ms=4568.4 total_ms=4568.6
+[web] /api/tts request method=POST content_type='application/json' query={} form={} json={'text': '\u3000\u3000安排完哨岗的事宜后，张肃朝小幸运走去，心中琢磨着军团未来发展的一些规划。', 'token': 'mytoken', 'seed': 1} fallback_form={}
+[web] enqueue voice=Vivian text='安排完哨岗的事宜后，张肃朝小幸运走去，心中琢磨着军团未来发展的一些规划。' queue_size=1 total_ms=0.0
+[web] task start worker=0 voice=Vivian wait_ms=0.1
+INFO:     127.0.0.1:64618 - "POST /api/tts HTTP/1.1" 200 OK
+[web] worker stream reuse index=0 voice=Vivian
+[web] request stream ready elapsed_ms=0.2
+[web] clone start worker=0 task_id=task_1 sample_rate=24000
+[web] clone finished(non-stream) elapsed_ms=1744.0
+----------------------------------------
+性能分析报告 (音频长度: 7.12s)
+  1. Prompt:    0.01s
+  2. Prefill:   0.01s
+  3. Generate:  1.61s (Talker: 0.25s, Predictor: 1.36s)
+  4. Decode:    0.10s
+  5. Latency:   1.72s (Generate: 1.62s, Decode: 0.10s)
+----------------------------------------
+核心总耗时: 1.62s | RTF (Core): 0.23
+[web] task finished worker=0 task_id=task_1 run_ms=1746.2 total_ms=1746.3
+[web] /api/tts request method=POST content_type='application/json' query={} form={} json={'text': '\u3000\u3000从目前的情况来看，需要尽快让更多人接触到橘氏武道的训练……', 'token': 'mytoken', 'seed': 1} fallback_form={}
+[web] enqueue voice=Vivian text='从目前的情况来看，需要尽快让更多人接触到橘氏武道的训练……' queue_size=1 total_ms=0.0
+[web] task start worker=0 voice=Vivian wait_ms=0.1
+INFO:     127.0.0.1:64618 - "POST /api/tts HTTP/1.1" 200 OK
+[web] worker stream reuse index=0 voice=Vivian
+[web] request stream ready elapsed_ms=0.5
+[web] clone start worker=0 task_id=task_2 sample_rate=24000
+[web] clone finished(non-stream) elapsed_ms=1367.9
+----------------------------------------
+性能分析报告 (音频长度: 5.36s)
+  1. Prompt:    0.00s
+  2. Prefill:   0.01s
+  3. Generate:  1.20s (Talker: 0.18s, Predictor: 1.02s)
+  4. Decode:    0.14s
+  5. Latency:   1.35s (Generate: 1.21s, Decode: 0.14s)
+----------------------------------------
+核心总耗时: 1.21s | RTF (Core): 0.23
+[web] task finished worker=0 task_id=task_2 run_ms=1369.8 total_ms=1369.9
+[web] /api/tts request method=POST content_type='application/json' query={} form={} json={'text': '\u3000\u3000当初没有往精英军团推广的原因是考虑到大部分人的身体素质不够，不仅无法得到加强，还有受伤的风险。', 'token': 'mytoken', 'seed': 1} fallback_form={}
+[web] enqueue voice=Vivian text='当初没有往精英军团推广的原因是考虑到大部分人的身体素质不够，不仅无法得到加强，还有受伤的风险。' queue_size=1 total_ms=0.1
+[web] task start worker=0 voice=Vivian wait_ms=0.3
+INFO:     127.0.0.1:64618 - "POST /api/tts HTTP/1.1" 200 OK
+[web] worker stream reuse index=0 voice=Vivian
+[web] request stream ready elapsed_ms=0.4
+[web] clone start worker=0 task_id=task_3 sample_rate=24000
+[web] clone finished(non-stream) elapsed_ms=2008.3
+----------------------------------------
+性能分析报告 (音频长度: 8.16s)
+  1. Prompt:    0.01s
+  2. Prefill:   0.01s
+  3. Generate:  1.84s (Talker: 0.28s, Predictor: 1.56s)
+  4. Decode:    0.13s
+  5. Latency:   1.99s (Generate: 1.85s, Decode: 0.13s)
+----------------------------------------
+核心总耗时: 1.85s | RTF (Core): 0.23
+[web] task finished worker=0 task_id=task_3 run_ms=2013.2 total_ms=2013.5
+[web] /api/tts request method=POST content_type='application/json' query={} form={} json={'text': '\u3000\u3000今非昔比，所有人的身体都在悄无声息之中得到强化……哪怕是不锻炼也在变强，相信现如今大部分人都能够适应那种强度的训练。', 'token': 'mytoken', 'seed': 1} fallback_form={}
+[web] enqueue voice=Vivian text='今非昔比，所有人的身体都在悄无声息之中得到强化……哪怕是不锻炼也在变强，相信现如今大部分人都能够适应那种强度的训练。' queue_size=1 total_ms=0.1
+INFO:     127.0.0.1:64618 - "POST /api/tts HTTP/1.1" 200 OK
+[web] task start worker=0 voice=Vivian wait_ms=0.2
+[web] worker stream reuse index=0 voice=Vivian
+[web] request stream ready elapsed_ms=0.6
+[web] clone start worker=0 task_id=task_4 sample_rate=24000
+[web] /api/tts request method=POST content_type='application/json' query={} form={} json={'text': '\u3000\u3000当初段五湖一行人带回来的洪老四，他或许称不上武学大师……但棍法确实有些名堂，四两拨千斤的巧妙如果融入到战斗当中，可以起到奇效。', 'token': 'mytoken', 'seed': 1} fallback_form={}
+[web] enqueue voice=Vivian text='当初段五湖一行人带回来的洪老四，他或许称不上武学大师……但棍法确实有些名堂，四两拨千斤的巧妙如果融入到战斗当中，可以起到奇效。' queue_size=1 total_ms=0.0
+INFO:     127.0.0.1:60205 - "POST /api/tts HTTP/1.1" 200 OK
+[web] clone finished(non-stream) elapsed_ms=3120.9
+----------------------------------------
+性能分析报告 (音频长度: 12.72s)
+  1. Prompt:    0.01s
+  2. Prefill:   0.01s
+  3. Generate:  2.83s (Talker: 0.44s, Predictor: 2.39s)
+  4. Decode:    0.25s
+  5. Latency:   3.09s (Generate: 2.84s, Decode: 0.25s)
+----------------------------------------
+核心总耗时: 2.84s | RTF (Core): 0.22
+[web] task finished worker=0 task_id=task_4 run_ms=3134.0 total_ms=3134.2
+[web] task start worker=0 voice=Vivian wait_ms=1015.7
+[web] worker stream reuse index=0 voice=Vivian
+[web] request stream ready elapsed_ms=1.3
+[web] clone start worker=0 task_id=task_5 sample_rate=24000
+[web] clone finished(non-stream) elapsed_ms=3483.4
+----------------------------------------
+性能分析报告 (音频长度: 13.84s)
+  1. Prompt:    0.01s
+  2. Prefill:   0.01s
+  3. Generate:  3.20s (Talker: 0.48s, Predictor: 2.72s)
+  4. Decode:    0.23s
+  5. Latency:   3.45s (Generate: 3.23s, Decode: 0.23s)
+----------------------------------------
+核心总耗时: 3.22s | RTF (Core): 0.23
+[web] task finished worker=0 task_id=task_5 run_ms=3489.1 total_ms=4504.9
+[web] /api/tts request method=POST content_type='application/json' query={} form={} json={'text': '\u3000\u3000当两个人的身体素质相仿，那么比拼的就是意识和技巧！', 'token': 'mytoken', 'seed': 1} fallback_form={}
+[web] enqueue voice=Vivian text='当两个人的身体素质相仿，那么比拼的就是意识和技巧！' queue_size=1 total_ms=0.0
+[web] task start worker=0 voice=Vivian wait_ms=0.1
+INFO:     127.0.0.1:60205 - "POST /api/tts HTTP/1.1" 200 OK
+[web] worker stream reuse index=0 voice=Vivian
+[web] request stream ready elapsed_ms=0.2
+[web] clone start worker=0 task_id=task_6 sample_rate=24000
+[web] clone finished(non-stream) elapsed_ms=1157.5
+----------------------------------------
+性能分析报告 (音频长度: 4.64s)
+  1. Prompt:    0.00s
+  2. Prefill:   0.01s
+  3. Generate:  1.01s (Talker: 0.16s, Predictor: 0.85s)
+  4. Decode:    0.11s
+  5. Latency:   1.14s (Generate: 1.02s, Decode: 0.11s)
+----------------------------------------
+核心总耗时: 1.03s | RTF (Core): 0.22
+[web] task finished worker=0 task_id=task_6 run_ms=1160.3 total_ms=1160.3
+[web] /api/tts request method=POST content_type='application/json' query={} form={} json={'text': '\u3000\u3000之前每周一次的课程，教授众人练习棍法，并没有太好的效果，如今看来有必要增加课时！', 'token': 'mytoken', 'seed': 1} fallback_form={}
+[web] enqueue voice=Vivian text='之前每周一次的课程，教授众人练习棍法，并没有太好的效果，如今看来有必要增加课时！' queue_size=1 total_ms=0.1
+[web] task start worker=0 voice=Vivian wait_ms=0.1
+INFO:     127.0.0.1:60205 - "POST /api/tts HTTP/1.1" 200 OK
+[web] worker stream reuse index=0 voice=Vivian
+[web] request stream ready elapsed_ms=0.3
+[web] clone start worker=0 task_id=task_7 sample_rate=24000
+[web] clone finished(non-stream) elapsed_ms=1983.2
+----------------------------------------
+性能分析报告 (音频长度: 8.40s)
+  1. Prompt:    0.00s
+  2. Prefill:   0.01s
+  3. Generate:  1.82s (Talker: 0.27s, Predictor: 1.55s)
+  4. Decode:    0.12s
+  5. Latency:   1.96s (Generate: 1.84s, Decode: 0.12s)
+----------------------------------------
+核心总耗时: 1.84s | RTF (Core): 0.22
+[web] task finished worker=0 task_id=task_7 run_ms=1985.7 total_ms=1985.8
+[web] /api/tts request method=POST content_type='application/json' query={} form={} json={'text': '\u3000\u3000只是如果让洪老四专注于棍法的传授，他自己就没时间训练，多少有点不公平。', 'token': 'mytoken', 'seed': 1} fallback_form={}
+[web] enqueue voice=Vivian text='只是如果让洪老四专注于棍法的传授，他自己就没时间训练，多少有点不公平。' queue_size=1 total_ms=0.2
+[web] task start worker=0 voice=Vivian wait_ms=0.3
+[web] worker stream reuse index=0 voice=Vivian
+[web] request stream ready elapsed_ms=0.1
+[web] clone start worker=0 task_id=task_8 sample_rate=24000
+INFO:     127.0.0.1:60205 - "POST /api/tts HTTP/1.1" 200 OK
+[web] clone finished(non-stream) elapsed_ms=1834.2
+----------------------------------------
+性能分析报告 (音频长度: 7.44s)
+  1. Prompt:    0.00s
+  2. Prefill:   0.01s
+  3. Generate:  1.62s (Talker: 0.25s, Predictor: 1.37s)
+  4. Decode:    0.19s
+  5. Latency:   1.81s (Generate: 1.63s, Decode: 0.19s)
+----------------------------------------
+核心总耗时: 1.63s | RTF (Core): 0.22
+[web] task finished worker=0 task_id=task_8 run_ms=1836.3 total_ms=1836.7
+[web] /api/tts request method=POST content_type='application/json' query={} form={} json={'text': '\u3000\u3000“反正我学得快，干脆我先找他学明白，阎罗军团就由我来教，让他专注教授精英和预备两个军团，然后上课的同时也跟着练……”', 'token': 'mytoken', 'seed': 1} fallback_form={}
+[web] enqueue voice=Vivian text='“反正我学得快，干脆我先找他学明白，阎罗军团就由我来教，让他专注教授精英和预备两个军团，然后上课的同时也跟着练……”' queue_size=1 total_ms=0.1
+[web] task start worker=0 voice=Vivian wait_ms=0.2
+INFO:     127.0.0.1:60205 - "POST /api/tts HTTP/1.1" 200 OK
+[web] worker stream reuse index=0 voice=Vivian
+[web] request stream ready elapsed_ms=0.2
+[web] clone start worker=0 task_id=task_9 sample_rate=24000
+[web] clone finished(non-stream) elapsed_ms=2735.0
+----------------------------------------
+性能分析报告 (音频长度: 11.52s)
+  1. Prompt:    0.01s
+  2. Prefill:   0.01s
+  3. Generate:  2.52s (Talker: 0.40s, Predictor: 2.12s)
+  4. Decode:    0.17s
+  5. Latency:   2.70s (Generate: 2.54s, Decode: 0.17s)
+----------------------------------------
+核心总耗时: 2.53s | RTF (Core): 0.22
+[web] task finished worker=0 task_id=task_9 run_ms=2741.9 total_ms=2742.1
+[web] /api/tts request method=POST content_type='application/json' query={} form={} json={'text': '\u3000\u3000思忖着，张肃回到住所。', 'token': 'mytoken', 'seed': 1} fallback_form={}
+[web] enqueue voice=Vivian text='思忖着，张肃回到住所。' queue_size=1 total_ms=0.0
+[web] task start worker=0 voice=Vivian wait_ms=0.1
+INFO:     127.0.0.1:60205 - "POST /api/tts HTTP/1.1" 200 OK
+[web] worker stream reuse index=0 voice=Vivian
+[web] request stream ready elapsed_ms=0.2
+[web] clone start worker=0 task_id=task_10 sample_rate=24000
+[web] clone finished(non-stream) elapsed_ms=750.6
+----------------------------------------
+性能分析报告 (音频长度: 2.88s)
+  1. Prompt:    0.00s
+  2. Prefill:   0.01s
+  3. Generate:  0.63s (Talker: 0.10s, Predictor: 0.54s)
+  4. Decode:    0.09s
+  5. Latency:   0.73s (Generate: 0.65s, Decode: 0.09s)
+----------------------------------------
+核心总耗时: 0.64s | RTF (Core): 0.22
+[web] task finished worker=0 task_id=task_10 run_ms=752.6 total_ms=752.7
+[web] /api/tts request method=POST content_type='application/json' query={} form={} json={'text': '\u3000\u3000“回来啦？喏，桌上，你的礼物。”', 'token': 'mytoken', 'seed': 1} fallback_form={}
+[web] enqueue voice=Vivian text='“回来啦？喏，桌上，你的礼物。”' queue_size=1 total_ms=0.1
+[web] task start worker=0 voice=Vivian wait_ms=0.1
+[web] worker stream reuse index=0 voice=Vivian
+INFO:     127.0.0.1:60205 - "POST /api/tts HTTP/1.1" 200 OK
+[web] request stream ready elapsed_ms=0.1
+[web] clone start worker=0 task_id=task_11 sample_rate=24000
+[web] clone finished(non-stream) elapsed_ms=1067.1
+----------------------------------------
+性能分析报告 (音频长度: 3.84s)
+  1. Prompt:    0.00s
+  2. Prefill:   0.02s
+  3. Generate:  0.97s (Talker: 0.16s, Predictor: 0.80s)
+  4. Decode:    0.05s
+  5. Latency:   1.05s (Generate: 0.99s, Decode: 0.05s)
+----------------------------------------
+核心总耗时: 0.99s | RTF (Core): 0.26
+[web] task finished worker=0 task_id=task_11 run_ms=1069.5 total_ms=1069.6
+```
+
+
 ---
 
 以下是源项目内容

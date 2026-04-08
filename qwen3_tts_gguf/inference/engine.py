@@ -17,7 +17,7 @@ class TTSEngine:
     """
     Qwen3-TTS 引擎：资源池与 Stream 工厂。
     """
-    def __init__(self, model_dir="model", onnx_provider="CUDA", llm_use_gpu=True, chunk_size=12, verbose=True):
+    def __init__(self, model_dir="model", onnx_provider="CUDA", llm_use_gpu=True, chunk_size=None, verbose=True):
         import time
         import numpy as np
         from tokenizers import Tokenizer
@@ -25,6 +25,8 @@ class TTSEngine:
         t_start = time.time()
         self.ready = False
         self.model_dir = Path(model_dir)
+        if chunk_size is None:
+            chunk_size = int(os.environ.get("QWEN_TTS_CHUNK_SIZE", "24"))
         self.chunk_size = chunk_size
         
         # 路径定义 (全线使用 Path 对象)
@@ -73,7 +75,9 @@ class TTSEngine:
             if verbose: print(f"🧠 [Engine] GGUF 推理后端就绪 (耗时: {time.time()-t_gguf:.2f}s)")
             
             # 5. 最后同步阻塞等待解码器信号
-            is_decoder_ready = self.decoder.wait_until_ready(timeout=10)
+            startup_timeout_env = os.environ.get("QWEN_TTS_ENGINE_READY_TIMEOUT")
+            startup_timeout = None if startup_timeout_env in (None, "", "none", "None", "NONE", "-1", "0") else float(startup_timeout_env)
+            is_decoder_ready = self.decoder.wait_until_ready(timeout=startup_timeout)
             if not is_decoder_ready:
                 logger.warning("⚠️ [Engine] 解码器就绪超时，渲染功能将不可用。")
                 self.ready = False

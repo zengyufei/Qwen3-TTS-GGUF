@@ -15,7 +15,8 @@ decoder.py - 状态化解码器封装 (Decoder)
     decoder.create_state()
 """
 import os
-os.environ["OMP_NUM_THREADS"] = "4"
+if "OMP_NUM_THREADS" not in os.environ:
+    os.environ["OMP_NUM_THREADS"] = os.environ.get("QWEN_TTS_DECODER_OMP_THREADS", "4")
 import numpy as np
 from . import logger
 
@@ -71,12 +72,22 @@ class StatefulDecoder:
         elif self.onnx_provider == 'DML' and 'DmlExecutionProvider' in available_providers:
             providers.insert(0, 'DmlExecutionProvider')
         elif self.onnx_provider == 'CUDA' and 'CUDAExecutionProvider' in available_providers:
-            providers.insert(0, 'CUDAExecutionProvider')
+            providers.insert(0, ('CUDAExecutionProvider', {
+                "do_copy_in_default_stream": 1,
+                "cudnn_conv_algo_search": "HEURISTIC",
+            }))
 
         sess_opts = ort.SessionOptions()
         sess_opts.log_severity_level = 3
-        sess_opts.add_session_config_entry("session.intra_op.allow_spinning", "0")
-        sess_opts.add_session_config_entry("session.inter_op.allow_spinning", "0")
+        allow_spinning = os.environ.get("QWEN_TTS_ORT_ALLOW_SPINNING", "1")
+        sess_opts.add_session_config_entry("session.intra_op.allow_spinning", "1" if allow_spinning == "1" else "0")
+        sess_opts.add_session_config_entry("session.inter_op.allow_spinning", "1" if allow_spinning == "1" else "0")
+        intra_op_threads = int(os.environ.get("QWEN_TTS_ORT_INTRA_OP_THREADS", "0"))
+        inter_op_threads = int(os.environ.get("QWEN_TTS_ORT_INTER_OP_THREADS", "0"))
+        if intra_op_threads > 0:
+            sess_opts.intra_op_num_threads = intra_op_threads
+        if inter_op_threads > 0:
+            sess_opts.inter_op_num_threads = inter_op_threads
         sess_opts.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL
 
         self.sess = ort.InferenceSession(onnx_path, sess_options=sess_opts, providers=providers)
@@ -290,6 +301,5 @@ class StatefulDecoder:
             "total_samples": self.total_samples_output,
             "kv_cache_len": self.past_keys[0].shape[2] if self.past_keys else 0,
         }
-
 
 

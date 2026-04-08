@@ -1,6 +1,7 @@
 import os
 import time
 import numpy as np
+import traceback
 from ..schema.protocol import DecodeRequest, DecoderResponse, DecoderSession
 
 def handle_decode_task(req: DecodeRequest, decoder, sessions, response_queue, record_queue=None):
@@ -65,7 +66,8 @@ def decoder_worker_proc(codes_queue, pcm_queue, decoder_onnx_path, onnx_provider
     支持多会话状态管理 (Session-based State Management)。
     """
     from ..decoder import StatefulDecoder
-    os.environ["OMP_NUM_THREADS"] = "4"
+    if "OMP_NUM_THREADS" not in os.environ:
+        os.environ["OMP_NUM_THREADS"] = os.environ.get("QWEN_TTS_DECODER_OMP_THREADS", "4")
     
     decoder = StatefulDecoder(decoder_onnx_path, onnx_provider=onnx_provider, chunk_size=chunk_size)
     pcm_queue.put(DecoderResponse(msg_type="READY", task_id="decoder"))

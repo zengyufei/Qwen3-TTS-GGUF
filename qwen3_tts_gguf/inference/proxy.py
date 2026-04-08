@@ -7,6 +7,7 @@ import atexit
 import threading
 import queue
 import time
+import os
 import numpy as np
 from typing import Optional, Union
 from .schema.result import TTSResult, DecodeResult
@@ -54,6 +55,10 @@ class DecoderProxy:
         
         self.stop_listener = False
         self.listener_thread = None
+        self.listener_poll_s = max(
+            0.001,
+            float(os.environ.get("QWEN_TTS_PROXY_LISTENER_POLL_S", "0.02")),
+        )
         
         self.start()
         
@@ -89,7 +94,7 @@ class DecoderProxy:
         """从结果队列中抓取数据并分类转发 (后台储蓄罐)"""
         while not self.stop_listener:
             try:
-                msg = self.result_q.get(timeout=0.1)
+                msg = self.result_q.get(timeout=self.listener_poll_s)
                 if msg is None: break
                 
                 if isinstance(msg, DecoderResponse):
@@ -166,14 +171,15 @@ class DecoderProxy:
             self.speaker_idle.set()
 
 
-    def wait_until_ready(self, timeout=10):
+    def wait_until_ready(self, timeout: Optional[float] = None):
         """阻塞直到所有工作进程就绪"""
         t0 = time.time()
-        while time.time() - t0 < timeout:
+        while True:
             if all(self.ready_states.values()):
                 return True
-            time.sleep(0.1)
-        return False
+            if timeout is not None and (time.time() - t0) >= timeout:
+                return False
+            time.sleep(self.listener_poll_s)
 
     def join_speaker(self, timeout: Optional[float] = None):
         """阻塞等待播放器列表任务清空"""
@@ -235,7 +241,7 @@ class DecoderProxy:
             return np.array([], dtype=np.float32)
         
         # 逻辑分支 B: 离线模式或流式终包，开始同步等待
-        self.events[task_id].wait(timeout=30.0)
+        self.events[task_id].wait(timeout=None)
         
         # 从消息列表中提取音频碎片和统计信息
         responses = self.results.get(task_id, [])

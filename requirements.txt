@@ -10,6 +10,7 @@ sox
 onnx
 onnxscript
 onnxruntime-directml
+#onnxruntime-gpu
 einops
 pydub
 av
