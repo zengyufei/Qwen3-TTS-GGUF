@@ -1,9 +1,13 @@
 import copy
+import io
 import os
 import queue
+import shutil
+import subprocess
 import threading
 import time
 import traceback
+import wave
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from pathlib import Path
@@ -27,7 +31,7 @@ VOICE_DIR = Path(os.environ.get("QWEN_TTS_VOICE_DIR", os.path.join("output", "el
 EXTRA_VOICE_DIR = Path(os.environ.get("QWEN_TTS_EXTRA_VOICE_DIR", os.path.join("output", "voices")))
 DEFAULT_VOICE = os.environ.get("QWEN_TTS_VOICE", "Vivian")
 ONNX_PROVIDER = os.environ.get("QWEN_TTS_ONNX_PROVIDER", "CUDA")
-MAX_CONCURRENT_STREAMS = 1
+MAX_CONCURRENT_STREAMS = 2
 CHUNK_SIZE = int(os.environ.get("QWEN_TTS_CHUNK_SIZE", "24"))
 STARTUP_WARMUP = os.environ.get("QWEN_TTS_STARTUP_WARMUP", "1") == "1"
 STARTUP_WARMUP_TEXT = os.environ.get("QWEN_TTS_STARTUP_WARMUP_TEXT", "hi")
@@ -37,6 +41,7 @@ UVICORN_KEEP_ALIVE_SECONDS = 2147483647
 RESULT_POLL_INTERVAL_S = max(0.001, float(os.environ.get("QWEN_TTS_RESULT_POLL_INTERVAL_S", "0.005")))
 UVICORN_HOST = os.environ.get("QWEN_TTS_HOST", "0.0.0.0")
 UVICORN_PORT = int(os.environ.get("QWEN_TTS_PORT", "8210"))
+FFMPEG_BIN = os.environ.get("QWEN_TTS_FFMPEG_BIN", "ffmpeg")
 
 engine: Optional[TTSEngine] = None
 voice_map: dict[str, "VoiceItem"] = {}
@@ -52,6 +57,28 @@ decoder_play_q_original = None
 decoder_play_q_silent_users = 0
 decoder_play_q_lock = threading.Lock()
 STREAM_END = object()
+
+
+def _install_hint_ffmpeg() -> str:
+    return (
+        "Install ffmpeg (Windows):\n"
+        "  winget install --id Gyan.FFmpeg -e\n"
+        "or\n"
+        "  choco install ffmpeg -y\n"
+        "or\n"
+        "  scoop install ffmpeg\n"
+        "Then restart service, or set QWEN_TTS_FFMPEG_BIN to full path of ffmpeg.exe."
+    )
+
+
+def _tool_status_message(tool: str, binary: str) -> str:
+    resolved = shutil.which(binary)
+    if resolved:
+        return f"[web] speed-engine tool ready: {tool} -> {resolved}"
+    return (
+        f"[web] speed-engine tool missing: {tool} ({binary})\n"
+        f"{_install_hint_ffmpeg()}"
+    )
 
 
 @dataclass(frozen=True)
@@ -73,7 +100,7 @@ class StreamTask:
 
 class StreamRequest(BaseModel):
     text: str = Field(..., min_length=1)
-    seed: float = Field(1.0, gt=0)
+    speed: float = Field(1.0, gt=0)
     voice: Optional[str] = None
     token: str = ""
 
@@ -119,6 +146,90 @@ def pcm_to_int16_bytes(audio: np.ndarray) -> bytes:
         return b""
     pcm = apply_output_gain(pcm)
     return (pcm * 32767.0).astype("<i2").tobytes()
+
+
+def _audio_to_wav_bytes(audio: np.ndarray, sample_rate: int) -> bytes:
+    pcm16 = (np.clip(np.asarray(audio, dtype=np.float32), -1.0, 1.0) * 32767.0).astype("<i2")
+    buf = io.BytesIO()
+    with wave.open(buf, "wb") as wf:
+        wf.setnchannels(1)
+        wf.setsampwidth(2)
+        wf.setframerate(int(sample_rate))
+        wf.writeframes(pcm16.tobytes())
+    return buf.getvalue()
+
+
+def _wav_bytes_to_audio(wav_bytes: bytes) -> np.ndarray:
+    with wave.open(io.BytesIO(wav_bytes), "rb") as wf:
+        channels = wf.getnchannels()
+        width = wf.getsampwidth()
+        frames = wf.getnframes()
+        raw = wf.readframes(frames)
+    if width != 2:
+        raise RuntimeError(f"Unsupported wav sample width from processor: {width}")
+    pcm = np.frombuffer(raw, dtype="<i2").astype(np.float32) / 32767.0
+    if channels > 1:
+        pcm = pcm.reshape(-1, channels).mean(axis=1)
+    return pcm
+
+
+def _build_atempo_chain(speed: float) -> str:
+    factors: list[float] = []
+    remaining = float(speed)
+    while remaining > 2.0:
+        factors.append(2.0)
+        remaining /= 2.0
+    while remaining < 0.5:
+        factors.append(0.5)
+        remaining /= 0.5
+    factors.append(remaining)
+    return ",".join([f"atempo={f:.6f}" for f in factors])
+
+
+def _time_stretch_atempo(audio: np.ndarray, sample_rate: int, speed: float) -> np.ndarray:
+    ffmpeg = shutil.which(FFMPEG_BIN) or FFMPEG_BIN
+    wav_in = _audio_to_wav_bytes(audio, sample_rate)
+    filter_chain = _build_atempo_chain(speed)
+    cmd = [
+        ffmpeg,
+        "-hide_banner",
+        "-loglevel",
+        "error",
+        "-f",
+        "wav",
+        "-i",
+        "pipe:0",
+        "-vn",
+        "-sn",
+        "-dn",
+        "-af",
+        filter_chain,
+        "-f",
+        "wav",
+        "pipe:1",
+    ]
+    try:
+        proc = subprocess.run(cmd, input=wav_in, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=True)
+    except FileNotFoundError as exc:
+        raise RuntimeError(
+            f"atempo engine requires ffmpeg; not found: {FFMPEG_BIN}\n{_install_hint_ffmpeg()}"
+        ) from exc
+    except subprocess.CalledProcessError as exc:
+        stderr = exc.stderr.decode("utf-8", errors="ignore")
+        raise RuntimeError(f"ffmpeg atempo failed: {stderr.strip() or exc}") from exc
+    return _wav_bytes_to_audio(proc.stdout)
+
+
+def time_stretch_keep_pitch(audio: np.ndarray, sample_rate: int, speed: float) -> np.ndarray:
+    pcm = np.asarray(audio, dtype=np.float32).reshape(-1)
+    if pcm.size == 0:
+        return pcm
+    if speed <= 0:
+        raise ValueError("speed must be greater than 0")
+    if abs(float(speed) - 1.0) < 1e-3:
+        return pcm
+
+    return _time_stretch_atempo(pcm, sample_rate, speed)
 
 
 def apply_output_gain(audio: np.ndarray) -> np.ndarray:
@@ -320,9 +431,15 @@ def process_stream_task(task: StreamTask, worker_index: int) -> None:
     log_timing("request stream ready", stream_started_at)
 
     config = build_stream_config()
-    sample_rate = max(1000, int(round(SAMPLE_RATE * task.speed)))
+    sample_rate = SAMPLE_RATE
     task_id = next_service_task_id(stream)
-    print(f"[web] clone start worker={worker_index} task_id={task_id} sample_rate={sample_rate}", flush=True)
+    print(
+        f"[web] clone start worker={worker_index} task_id={task_id} sample_rate={sample_rate} speed={task.speed} engine=atempo",
+        flush=True,
+    )
+
+    if config.streaming and abs(task.speed - 1.0) > 1e-3:
+        raise RuntimeError("pitch-preserving speed is only supported in non-streaming mode")
 
     if not config.streaming:
         clone_started_at = time.perf_counter()
@@ -333,8 +450,10 @@ def process_stream_task(task: StreamTask, worker_index: int) -> None:
             if result is None or result.audio is None:
                 raise RuntimeError("Synthesis returned no audio.")
             result.print_stats()
+            audio = np.asarray(result.audio, dtype=np.float32)
+            audio = time_stretch_keep_pitch(audio, sample_rate, task.speed)
             task.chunks.put(wav_stream_header(sample_rate))
-            payload = pcm_to_int16_bytes(np.asarray(result.audio, dtype=np.float32))
+            payload = pcm_to_int16_bytes(audio)
             if payload:
                 task.chunks.put(payload)
             print(
@@ -536,6 +655,8 @@ async def lifespan(_: FastAPI):
         f"[web] startup workers={MAX_CONCURRENT_STREAMS} startup_warmup={STARTUP_WARMUP} default_voice={DEFAULT_VOICE} output_gain={OUTPUT_GAIN} chunk_size={CHUNK_SIZE} poll_s={RESULT_POLL_INTERVAL_S} ort_intra={os.environ.get('QWEN_TTS_ORT_INTRA_OP_THREADS')} ort_inter={os.environ.get('QWEN_TTS_ORT_INTER_OP_THREADS')}",
         flush=True,
     )
+    print(_tool_status_message("ffmpeg", FFMPEG_BIN), flush=True)
+    print("[web] speed engine fixed=atempo", flush=True)
     decoder_play_q_original = engine.decoder.play_q
     default_voice_result = prepare_default_voice_result(resolve_voice(DEFAULT_VOICE))
     print(f"[web] default voice ready name={DEFAULT_VOICE}", flush=True)
@@ -595,17 +716,18 @@ async def api_tts(request: Request):
     voice_name = payload.get("voice")
     voice_name = str(voice_name).strip() if voice_name is not None and str(voice_name).strip() else None
     token = str(payload.get("token", ""))
+    raw_speed = payload.get("speed", 1.0)
     try:
-        seed = float(payload.get("seed", 1.0))
+        speed = float(raw_speed)
     except (TypeError, ValueError):
-        raise HTTPException(status_code=400, detail="seed must be a number")
+        raise HTTPException(status_code=400, detail="speed must be a number")
 
     if API_STREAM_TOKEN and token != API_STREAM_TOKEN:
         raise HTTPException(status_code=404, detail="Not Found")
     if not text:
         raise HTTPException(status_code=400, detail="text must not be empty")
-    if seed <= 0:
-        raise HTTPException(status_code=400, detail="seed must be greater than 0")
+    if speed <= 0:
+        raise HTTPException(status_code=400, detail="speed must be greater than 0")
 
     request_started_at = time.perf_counter()
     try:
@@ -615,7 +737,7 @@ async def api_tts(request: Request):
 
     task = StreamTask(
         text=text,
-        speed=seed,
+        speed=speed,
         voice=voice,
         enqueued_at=time.perf_counter(),
         chunks=queue.Queue(maxsize=32),
