@@ -6,7 +6,7 @@
 
 ### 一键http.bat
 
-启动后访问 http://127.0.0.1:8210/
+启动后访问 http://127.0.0.1:8210/api/tts
 
 提供网页版测试
 
@@ -20,7 +20,7 @@ http://192.168.1.222:8210/api/stream,
     "timeout": "120000",
     "body": {
         "text": "{{ speakText }}",
-        "seed": 1.0
+        "speed": 1.0
     }
 }
 ContextType: audio/wav

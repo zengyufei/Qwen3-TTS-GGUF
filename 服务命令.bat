@@ -6,7 +6,7 @@ cd /d "%~dp0"
 
 :: 初始化上一次操作描述
 set "last_action=无"
-set "kill_exe_name=frpc.exe"
+set "kill_exe_name=qwen.exe"
 
 :menu
 cls

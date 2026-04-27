@@ -182,15 +182,18 @@ class TTSStream:
 
     def _run_engine_loop(self, pdata: PromptData, timing: Timing, cfg: TTSConfig) -> LoopOutput:
         streaming = cfg.streaming
+        pipeline_decode = bool(getattr(cfg, "pipeline_decode", False)) and not streaming
+        decode_stream = streaming or pipeline_decode
         chunk_size = self.engine.chunk_size
         all_codes = []
         turn_summed_embeds = []
         chunk_buffer = []
+        loop_started_at = time.time()
         
-        logger.info(f"[Stream] 启动推理循环: max_steps={cfg.max_steps}, streaming={streaming}")
+        logger.info(f"[Stream] 启动推理循环: max_steps={cfg.max_steps}, streaming={streaming}, pipeline_decode={pipeline_decode}")
         
         if self.decoder:
-            logger.info("[Stream] 检测到解码器，准备流式输出")
+            logger.info("[Stream] 检测到解码器，准备解码输出")
             
         step_count = 0
         
@@ -198,6 +201,30 @@ class TTSStream:
         current_task_id = f"task_{self.task_counter}"
         self.task_counter += 1
         last_chunk_time = time.time()
+        decode_started = False
+
+        def decode_chunk(is_final: bool):
+            nonlocal chunk_buffer, last_chunk_time, decode_started
+
+            timing.chunk_gen_times.append(time.time() - last_chunk_time)
+            last_chunk_time = time.time()
+
+            codes = (
+                np.asarray(chunk_buffer, dtype=np.int64)
+                if chunk_buffer
+                else np.zeros((0, 16), dtype=np.int64)
+            )
+            state = self.voice.final_state if (not decode_started and self.voice and self.voice.final_state) else None
+            decode_started = True
+
+            return self.decoder.decode(
+                codes,
+                task_id=current_task_id,
+                is_final=is_final,
+                stream=decode_stream,
+                state=state,
+                playback=cfg.playback if streaming else False,
+            )
         
         for step_codes, summed_vec in self._run_engine_loop_gen(pdata, cfg, timing):
             step_count += 1
@@ -210,16 +237,10 @@ class TTSStream:
             # 累积到 chunk_buffer
             chunk_buffer.append(step_codes)
 
-            if not streaming or len(chunk_buffer) < chunk_size:
+            if not decode_stream or len(chunk_buffer) < chunk_size:
                 continue
 
-            # 记录该 chunk 的生成耗时 
-            timing.chunk_gen_times.append(time.time() - last_chunk_time); last_chunk_time = time.time()
-            
-            # 解码 chunk
-            state = self.voice.final_state if (len(all_codes) == chunk_size and self.voice and self.voice.final_state) else None
-            self.decoder.decode(np.array(chunk_buffer), task_id=current_task_id, 
-                                is_final=False, stream=streaming, state=state, playback=cfg.playback)
+            decode_chunk(is_final=False)
             
             # 清空 chunk_buffer 以积累下一批
             chunk_buffer = []
@@ -227,15 +248,10 @@ class TTSStream:
         logger.info(f"[Stream] 推理循环结束，共 {step_count} 步")
 
         # 最后一个 chunk，此时 decode 会返回 DecodeResult
-        timing.chunk_gen_times.append(time.time() - last_chunk_time)
-        
-        state = self.voice.final_state if (not streaming and self.voice and self.voice.final_state) else None
-        decode_result = self.decoder.decode(
-            np.array(chunk_buffer) if chunk_buffer else np.zeros((0, 16)), 
-            task_id=current_task_id, is_final=True, stream=streaming, state=state, playback=cfg.playback
-        )
+        decode_result = decode_chunk(is_final=True)
         # 记录 decoder 的每一个 chunk 的耗时
         timing.decoder_compute_times = decode_result.chunk_compute_times
+        timing.wall_clock_time = timing.prompt_time + (time.time() - loop_started_at)
 
         return LoopOutput(
             all_codes=all_codes, 
@@ -310,7 +326,7 @@ class TTSStream:
                 # ---------------- Predictor Stage ----------------
                 # 根据第 0 层码本和 Talker 隐层，预测完整的 16 层码本
                 t_c_s = time.time()
-                step_codes, step_embeds_2048 = self.predictor.predict_frame(
+                step_codes, audio_summed = self.predictor.predict_frame(
                     m_hidden, 
                     code_0, 
                     sampler=predictor_sampler
@@ -320,7 +336,6 @@ class TTSStream:
                 # ---------------- Feedback Stage ----------------
                 t_m_s = time.time()
                 # 汇总 16 层音频 Embedding
-                audio_summed = np.sum(step_embeds_2048, axis=0) 
                 # 反馈给 Talker。Talker 内部会自动执行 [Audio + Text] 融合
                 m_hidden = self.talker.decode_step(audio_summed, seq_id=0)
                 timing.talker_loop_times.append(time.time() - t_m_s)

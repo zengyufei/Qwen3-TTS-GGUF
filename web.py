@@ -1,4 +1,5 @@
 import copy
+import hashlib
 import io
 import os
 import queue
@@ -8,6 +9,8 @@ import threading
 import time
 import traceback
 import wave
+from collections import OrderedDict
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from pathlib import Path
@@ -31,23 +34,28 @@ VOICE_DIR = Path(os.environ.get("QWEN_TTS_VOICE_DIR", os.path.join("output", "el
 EXTRA_VOICE_DIR = Path(os.environ.get("QWEN_TTS_EXTRA_VOICE_DIR", os.path.join("output", "voices")))
 DEFAULT_VOICE = os.environ.get("QWEN_TTS_VOICE", "Vivian")
 ONNX_PROVIDER = os.environ.get("QWEN_TTS_ONNX_PROVIDER", "CUDA")
-MAX_CONCURRENT_STREAMS = 2
+MAX_CONCURRENT_STREAMS = max(1, int(os.environ.get("QWEN_TTS_STREAM_WORKERS", "4")))
 CHUNK_SIZE = int(os.environ.get("QWEN_TTS_CHUNK_SIZE", "24"))
 STARTUP_WARMUP = os.environ.get("QWEN_TTS_STARTUP_WARMUP", "1") == "1"
 STARTUP_WARMUP_TEXT = os.environ.get("QWEN_TTS_STARTUP_WARMUP_TEXT", "hi")
-API_STREAM_TOKEN = os.environ.get("QWEN_TTS_STREAM_TOKEN", "mytoken")
+API_STREAM_TOKEN = os.environ.get("QWEN_TTS_STREAM_TOKEN", "zengleqi")
 OUTPUT_GAIN = float(os.environ.get("QWEN_TTS_OUTPUT_GAIN", "1.5"))
+PARALLEL_SEGMENTS = os.environ.get("QWEN_TTS_PARALLEL_SEGMENTS", "1") == "1"
+SEGMENT_MIN_CHARS = max(1, int(os.environ.get("QWEN_TTS_SEGMENT_MIN_CHARS", "5")))
+SEGMENT_MAX_CHARS = max(SEGMENT_MIN_CHARS, int(os.environ.get("QWEN_TTS_SEGMENT_MAX_CHARS", "420")))
 UVICORN_KEEP_ALIVE_SECONDS = 2147483647
 RESULT_POLL_INTERVAL_S = max(0.001, float(os.environ.get("QWEN_TTS_RESULT_POLL_INTERVAL_S", "0.005")))
 UVICORN_HOST = os.environ.get("QWEN_TTS_HOST", "0.0.0.0")
 UVICORN_PORT = int(os.environ.get("QWEN_TTS_PORT", "8210"))
 FFMPEG_BIN = os.environ.get("QWEN_TTS_FFMPEG_BIN", "ffmpeg")
+TTS_CACHE_SIZE = max(1, int(os.environ.get("QWEN_TTS_CACHE_SIZE", "120")))
 
 engine: Optional[TTSEngine] = None
 voice_map: dict[str, "VoiceItem"] = {}
 request_queue: "queue.Queue[Optional[StreamTask]]"
 worker_threads: list[threading.Thread] = []
 worker_streams: list[object] = []
+worker_stream_locks: list[threading.Lock] = []
 worker_stream_voice_names: list[str] = []
 default_voice_result = None
 stream_config_singleton: Optional[TTSConfig] = None
@@ -57,6 +65,8 @@ decoder_play_q_original = None
 decoder_play_q_silent_users = 0
 decoder_play_q_lock = threading.Lock()
 STREAM_END = object()
+audio_cache: "OrderedDict[str, bytes]" = OrderedDict()
+audio_cache_lock = threading.Lock()
 
 
 def _install_hint_ffmpeg() -> str:
@@ -81,6 +91,39 @@ def _tool_status_message(tool: str, binary: str) -> str:
     )
 
 
+def _cache_key_from_text_voice(text: str, voice_name: str) -> str:
+    material = f"{voice_name}\n{text}"
+    return hashlib.sha256(material.encode("utf-8")).hexdigest()
+
+
+def _cache_get(key: str) -> Optional[bytes]:
+    with audio_cache_lock:
+        data = audio_cache.get(key)
+        if data is None:
+            print(f"[web] cache MISS key={key[:12]} size={len(audio_cache)}", flush=True)
+            return None
+        print(f"[web] cache HIT key={key[:12]} size={len(audio_cache)}", flush=True)
+        return data
+
+
+def _cache_put(key: str, wav_bytes: bytes) -> None:
+    with audio_cache_lock:
+        replaced = key in audio_cache
+        if key in audio_cache:
+            audio_cache.pop(key, None)
+        audio_cache[key] = wav_bytes
+        print(
+            f"[web] cache PUT key={key[:12]} bytes={len(wav_bytes)} size={len(audio_cache)} replaced={replaced}",
+            flush=True,
+        )
+        while len(audio_cache) > TTS_CACHE_SIZE:
+            evicted_key, _ = audio_cache.popitem(last=False)
+            print(
+                f"[web] cache EVICT key={evicted_key[:12]} size={len(audio_cache)} limit={TTS_CACHE_SIZE}",
+                flush=True,
+            )
+
+
 @dataclass(frozen=True)
 class VoiceItem:
     name: str
@@ -93,6 +136,7 @@ class VoiceItem:
 class StreamTask:
     text: str
     speed: float
+    cache_key: str
     voice: VoiceItem
     enqueued_at: float
     chunks: "queue.Queue[object]"
@@ -100,7 +144,7 @@ class StreamTask:
 
 class StreamRequest(BaseModel):
     text: str = Field(..., min_length=1)
-    speed: float = Field(1.0, gt=0)
+    speed: float = 0.0
     voice: Optional[str] = None
     token: str = ""
 
@@ -232,6 +276,17 @@ def time_stretch_keep_pitch(audio: np.ndarray, sample_rate: int, speed: float) -
     return _time_stretch_atempo(pcm, sample_rate, speed)
 
 
+def map_app_speed_to_factor(raw_speed) -> tuple[float, float]:
+    try:
+        speed_step = float(raw_speed)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("speed must be a number") from exc
+    speed_factor = 1.0 + speed_step * 0.02
+    if speed_factor <= 0:
+        raise ValueError("mapped speed factor must be greater than 0")
+    return speed_step, speed_factor
+
+
 def apply_output_gain(audio: np.ndarray) -> np.ndarray:
     pcm = np.asarray(audio, dtype=np.float32)
     if pcm.size == 0:
@@ -275,6 +330,61 @@ def log_timing(label: str, started_at: float) -> float:
     return now
 
 
+def split_tts_segments(text: str, min_chars: int = SEGMENT_MIN_CHARS, max_chars: int = SEGMENT_MAX_CHARS) -> list[str]:
+    terminators = set("。！？!?；;.")
+    soft_breaks = "，,、 "
+    pieces = []
+    buf = []
+
+    def join_parts(left: str, right: str) -> str:
+        if left and right and left[-1].isascii() and right[0].isascii():
+            return f"{left} {right}"
+        return f"{left}{right}"
+
+    for ch in text.strip():
+        buf.append(ch)
+        if ch in terminators:
+            piece = "".join(buf).strip()
+            if piece:
+                pieces.append(piece)
+            buf = []
+
+    tail = "".join(buf).strip()
+    if tail:
+        pieces.append(tail)
+
+    long_split = []
+    for piece in pieces:
+        rest = piece
+        while len(rest) > max_chars:
+            window = rest[:max_chars]
+            cut = max(window.rfind(mark) for mark in soft_breaks)
+            if cut < min_chars:
+                cut = max_chars - 1
+            part = rest[:cut + 1].strip()
+            if part:
+                long_split.append(part)
+            rest = rest[cut + 1:].strip()
+        if rest:
+            long_split.append(rest)
+
+    merged = []
+    pending = ""
+    for piece in long_split:
+        pending = join_parts(pending, piece).strip() if pending else piece
+        if len(pending) >= min_chars:
+            merged.append(pending)
+            pending = ""
+
+    if pending:
+        if merged:
+            merged[-1] = join_parts(merged[-1], pending).strip()
+        else:
+            merged.append(pending)
+
+    return [seg for seg in merged if seg]
+
+
 def next_service_task_id(stream) -> str:
     global service_task_counter
     with service_task_counter_lock:
@@ -315,6 +425,78 @@ def load_voice_into_stream(stream, voice: VoiceItem) -> bool:
     return bool(stream.set_voice(str(voice.path)))
 
 
+def bind_worker_stream_voice(worker_index: int, voice: VoiceItem) -> object:
+    stream = worker_streams[worker_index]
+    current_voice_name = worker_stream_voice_names[worker_index]
+    if current_voice_name != voice.name:
+        voice_loaded = load_voice_into_stream(stream, voice)
+        if not voice_loaded:
+            raise RuntimeError(f"Failed to switch worker {worker_index} voice to {voice.name}")
+        worker_stream_voice_names[worker_index] = voice.name
+        print(f"[web] worker stream rebound index={worker_index} voice={voice.name}", flush=True)
+    else:
+        print(f"[web] worker stream reuse index={worker_index} voice={voice.name}", flush=True)
+    return stream
+
+
+def synthesize_on_worker(worker_index: int, text: str, voice: VoiceItem, config: TTSConfig, label: str):
+    with worker_stream_locks[worker_index]:
+        stream_started_at = time.perf_counter()
+        stream = bind_worker_stream_voice(worker_index, voice)
+        log_timing(f"{label} stream ready", stream_started_at)
+        task_id = next_service_task_id(stream)
+        print(
+            f"[web] clone start worker={worker_index} task_id={task_id} label={label} text_len={len(text)}",
+            flush=True,
+        )
+
+        clone_started_at = time.perf_counter()
+        try:
+            result = stream.clone(text=text, language="Chinese", config=config)
+            log_timing(f"{label} clone finished", clone_started_at)
+            if result is None or result.audio is None:
+                raise RuntimeError("Synthesis returned no audio.")
+            return result
+        finally:
+            try:
+                stream.join()
+            except Exception:
+                pass
+
+
+def synthesize_parallel_segments(task: StreamTask, config: TTSConfig, segments: list[str]) -> np.ndarray:
+    max_workers = min(len(segments), MAX_CONCURRENT_STREAMS)
+    print(
+        f"[web] parallel segments start count={len(segments)} workers={max_workers} voice={task.voice.name}",
+        flush=True,
+    )
+
+    def run_segment(index: int, segment_text: str):
+        worker_index = index % MAX_CONCURRENT_STREAMS
+        segment_config = copy.copy(config)
+        label = f"segment {index + 1}/{len(segments)}"
+        result = synthesize_on_worker(worker_index, segment_text, task.voice, segment_config, label)
+        result.print_stats()
+        audio = np.asarray(result.audio, dtype=np.float32)
+        print(
+            f"[web] parallel segment done index={index} worker={worker_index} samples={audio.shape[0]} text={segment_text!r}",
+            flush=True,
+        )
+        return index, audio
+
+    ordered = [None] * len(segments)
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        futures = [executor.submit(run_segment, idx, segment) for idx, segment in enumerate(segments)]
+        for future in futures:
+            index, audio = future.result()
+            ordered[index] = audio
+
+    audios = [audio for audio in ordered if audio is not None and audio.size > 0]
+    if not audios:
+        raise RuntimeError("Parallel segment synthesis returned no audio.")
+    return np.concatenate(audios)
+
+
 def build_stream_config() -> TTSConfig:
     global stream_config_singleton
 
@@ -325,6 +507,7 @@ def build_stream_config() -> TTSConfig:
         "seed": 95,
         "sub_seed": 95,
         "streaming": False,
+        "pipeline_decode": os.environ.get("QWEN_TTS_PIPELINE_DECODE", "1") == "1",
         "playback": False,
 
         #"top_k": 60,
@@ -417,24 +600,10 @@ def process_stream_task(task: StreamTask, worker_index: int) -> None:
     wait_ms = (total_started_at - task.enqueued_at) * 1000.0
     print(f"[web] task start worker={worker_index} voice={task.voice.name} wait_ms={wait_ms:.1f}", flush=True)
 
-    stream_started_at = time.perf_counter()
-    stream = worker_streams[worker_index]
-    current_voice_name = worker_stream_voice_names[worker_index]
-    if current_voice_name != task.voice.name:
-        voice_loaded = load_voice_into_stream(stream, task.voice)
-        if not voice_loaded:
-            raise RuntimeError(f"Failed to switch worker {worker_index} voice to {task.voice.name}")
-        worker_stream_voice_names[worker_index] = task.voice.name
-        print(f"[web] worker stream rebound index={worker_index} voice={task.voice.name}", flush=True)
-    else:
-        print(f"[web] worker stream reuse index={worker_index} voice={task.voice.name}", flush=True)
-    log_timing("request stream ready", stream_started_at)
-
     config = build_stream_config()
     sample_rate = SAMPLE_RATE
-    task_id = next_service_task_id(stream)
     print(
-        f"[web] clone start worker={worker_index} task_id={task_id} sample_rate={sample_rate} speed={task.speed} engine=atempo",
+        f"[web] clone request worker={worker_index} sample_rate={sample_rate} speed={task.speed} engine=atempo parallel_segments={int(PARALLEL_SEGMENTS)}",
         flush=True,
     )
 
@@ -445,105 +614,112 @@ def process_stream_task(task: StreamTask, worker_index: int) -> None:
         clone_started_at = time.perf_counter()
         acquire_decoder_silence()
         try:
-            result = stream.clone(text=task.text, language="Chinese", config=config)
+            segments = split_tts_segments(task.text) if PARALLEL_SEGMENTS else [task.text]
+            use_parallel_segments = PARALLEL_SEGMENTS and len(segments) > 1
+            if use_parallel_segments:
+                base_audio = synthesize_parallel_segments(task, config, segments)
+            else:
+                result = synthesize_on_worker(worker_index, task.text, task.voice, config, "request")
+                result.print_stats()
+                base_audio = np.asarray(result.audio, dtype=np.float32)
             log_timing("clone finished(non-stream)", clone_started_at)
-            if result is None or result.audio is None:
-                raise RuntimeError("Synthesis returned no audio.")
-            result.print_stats()
-            audio = np.asarray(result.audio, dtype=np.float32)
-            audio = time_stretch_keep_pitch(audio, sample_rate, task.speed)
+            _cache_put(task.cache_key, _audio_to_wav_bytes(base_audio, sample_rate))
+            audio = time_stretch_keep_pitch(base_audio, sample_rate, task.speed)
             task.chunks.put(wav_stream_header(sample_rate))
             payload = pcm_to_int16_bytes(audio)
             if payload:
                 task.chunks.put(payload)
             print(
-                f"[web] task finished worker={worker_index} task_id={task_id} run_ms={(time.perf_counter() - total_started_at) * 1000.0:.1f} total_ms={(time.perf_counter() - task.enqueued_at) * 1000.0:.1f}",
+                f"[web] task finished worker={worker_index} segments={len(segments)} run_ms={(time.perf_counter() - total_started_at) * 1000.0:.1f} total_ms={(time.perf_counter() - task.enqueued_at) * 1000.0:.1f}",
                 flush=True,
             )
             return
+        finally:
+            release_decoder_silence()
+
+    with worker_stream_locks[worker_index]:
+        stream_started_at = time.perf_counter()
+        stream = bind_worker_stream_voice(worker_index, task.voice)
+        log_timing("request stream ready", stream_started_at)
+        task_id = next_service_task_id(stream)
+
+        result_holder: dict[str, object] = {"result": None, "error": None, "done": False}
+
+        def run_clone() -> None:
+            try:
+                result_holder["result"] = stream.clone(text=task.text, language="Chinese", config=config)
+            except Exception as exc:
+                result_holder["error"] = exc
+            finally:
+                result_holder["done"] = True
+
+        clone_thread = threading.Thread(target=run_clone, daemon=True)
+        clone_started_at = time.perf_counter()
+        acquire_decoder_silence()
+        clone_thread.start()
+        emitted_count = 0
+        emitted_samples = 0
+        header_sent = False
+        first_chunk_logged = False
+
+        try:
+            while True:
+                responses = stream.decoder.get_decode_result(task_id).responses
+                new_responses = responses[emitted_count:]
+                emitted_count = len(responses)
+
+                if not header_sent and (new_responses or result_holder["done"]):
+                    task.chunks.put(wav_stream_header(sample_rate))
+                    header_sent = True
+
+                wrote_chunk = False
+                for response in new_responses:
+                    if response.msg_type != "AUDIO" or response.audio is None or len(response.audio) == 0:
+                        continue
+                    payload = pcm_to_int16_bytes(response.audio)
+                    if payload:
+                        if not first_chunk_logged:
+                            log_timing("first audio chunk ready", clone_started_at)
+                            first_chunk_logged = True
+                        emitted_samples += len(response.audio)
+                        wrote_chunk = True
+                        task.chunks.put(payload)
+
+                if result_holder["done"]:
+                    break
+
+                if not wrote_chunk:
+                    time.sleep(RESULT_POLL_INTERVAL_S)
+
+            clone_thread.join()
+            log_timing("clone thread finished", clone_started_at)
+            if result_holder["error"] is not None:
+                raise RuntimeError(str(result_holder["error"]))
+
+            result = result_holder["result"]
+            if result is None or result.audio is None:
+                raise RuntimeError("Synthesis returned no audio.")
+
+            result.print_stats()
+
+            full_audio = np.asarray(result.audio, dtype=np.float32)
+            _cache_put(task.cache_key, _audio_to_wav_bytes(full_audio, sample_rate))
+            if not header_sent:
+                task.chunks.put(wav_stream_header(sample_rate))
+            if emitted_samples < full_audio.shape[0]:
+                tail = pcm_to_int16_bytes(full_audio[emitted_samples:])
+                if tail:
+                    task.chunks.put(tail)
+            print(
+                f"[web] task finished worker={worker_index} task_id={task_id} run_ms={(time.perf_counter() - total_started_at) * 1000.0:.1f} total_ms={(time.perf_counter() - task.enqueued_at) * 1000.0:.1f}",
+                flush=True,
+            )
         finally:
             try:
                 stream.join()
             except Exception:
                 pass
             release_decoder_silence()
-
-    result_holder: dict[str, object] = {"result": None, "error": None, "done": False}
-
-    def run_clone() -> None:
-        try:
-            result_holder["result"] = stream.clone(text=task.text, language="Chinese", config=config)
-        except Exception as exc:
-            result_holder["error"] = exc
-        finally:
-            result_holder["done"] = True
-
-    clone_thread = threading.Thread(target=run_clone, daemon=True)
-    clone_started_at = time.perf_counter()
-    acquire_decoder_silence()
-    clone_thread.start()
-    emitted_count = 0
-    emitted_samples = 0
-    header_sent = False
-    first_chunk_logged = False
-
-    try:
-        while True:
-            responses = stream.decoder.get_decode_result(task_id).responses
-            new_responses = responses[emitted_count:]
-            emitted_count = len(responses)
-
-            if not header_sent and (new_responses or result_holder["done"]):
-                task.chunks.put(wav_stream_header(sample_rate))
-                header_sent = True
-
-            wrote_chunk = False
-            for response in new_responses:
-                if response.msg_type != "AUDIO" or response.audio is None or len(response.audio) == 0:
-                    continue
-                payload = pcm_to_int16_bytes(response.audio)
-                if payload:
-                    if not first_chunk_logged:
-                        log_timing("first audio chunk ready", clone_started_at)
-                        first_chunk_logged = True
-                    emitted_samples += len(response.audio)
-                    wrote_chunk = True
-                    task.chunks.put(payload)
-
-            if result_holder["done"]:
-                break
-
-            if not wrote_chunk:
-                time.sleep(RESULT_POLL_INTERVAL_S)
-
-        clone_thread.join()
-        log_timing("clone thread finished", clone_started_at)
-        if result_holder["error"] is not None:
-            raise RuntimeError(str(result_holder["error"]))
-
-        result = result_holder["result"]
-        if result is None or result.audio is None:
-            raise RuntimeError("Synthesis returned no audio.")
-
-        result.print_stats()
-
-        full_audio = np.asarray(result.audio, dtype=np.float32)
-        if not header_sent:
-            task.chunks.put(wav_stream_header(sample_rate))
-        if emitted_samples < full_audio.shape[0]:
-            tail = pcm_to_int16_bytes(full_audio[emitted_samples:])
-            if tail:
-                task.chunks.put(tail)
-        print(
-            f"[web] task finished worker={worker_index} task_id={task_id} run_ms={(time.perf_counter() - total_started_at) * 1000.0:.1f} total_ms={(time.perf_counter() - task.enqueued_at) * 1000.0:.1f}",
-            flush=True,
-        )
-    finally:
-        try:
-            stream.join()
-        except Exception:
-            pass
-        release_decoder_silence()
 
 
 def stream_worker(worker_index: int) -> None:
@@ -629,7 +805,7 @@ async def parse_flexible_request_payload(request: Request, route_name: str) -> d
 @asynccontextmanager
 async def lifespan(_: FastAPI):
     global decoder_play_q_original, default_voice_result, engine, request_queue
-    global stream_config_singleton, voice_map, worker_stream_voice_names, worker_streams, worker_threads
+    global stream_config_singleton, voice_map, worker_stream_locks, worker_stream_voice_names, worker_streams, worker_threads
 
     if not os.path.isdir(MODEL_DIR):
         raise RuntimeError(f"Model directory not found: {os.path.abspath(MODEL_DIR)}")
@@ -652,11 +828,12 @@ async def lifespan(_: FastAPI):
         raise RuntimeError("TTS engine failed to initialize.")
 
     print(
-        f"[web] startup workers={MAX_CONCURRENT_STREAMS} startup_warmup={STARTUP_WARMUP} default_voice={DEFAULT_VOICE} output_gain={OUTPUT_GAIN} chunk_size={CHUNK_SIZE} poll_s={RESULT_POLL_INTERVAL_S} ort_intra={os.environ.get('QWEN_TTS_ORT_INTRA_OP_THREADS')} ort_inter={os.environ.get('QWEN_TTS_ORT_INTER_OP_THREADS')}",
+        f"[web] startup workers={MAX_CONCURRENT_STREAMS} parallel_segments={int(PARALLEL_SEGMENTS)} segment_min={SEGMENT_MIN_CHARS} segment_max={SEGMENT_MAX_CHARS} startup_warmup={STARTUP_WARMUP} default_voice={DEFAULT_VOICE} output_gain={OUTPUT_GAIN} chunk_size={CHUNK_SIZE} pipeline_decode={os.environ.get('QWEN_TTS_PIPELINE_DECODE', '1')} poll_s={RESULT_POLL_INTERVAL_S} ort_intra={os.environ.get('QWEN_TTS_ORT_INTRA_OP_THREADS')} ort_inter={os.environ.get('QWEN_TTS_ORT_INTER_OP_THREADS')}",
         flush=True,
     )
     print(_tool_status_message("ffmpeg", FFMPEG_BIN), flush=True)
     print("[web] speed engine fixed=atempo", flush=True)
+    print(f"[web] audio cache enabled fifo_size={TTS_CACHE_SIZE}", flush=True)
     decoder_play_q_original = engine.decoder.play_q
     default_voice_result = prepare_default_voice_result(resolve_voice(DEFAULT_VOICE))
     print(f"[web] default voice ready name={DEFAULT_VOICE}", flush=True)
@@ -666,10 +843,12 @@ async def lifespan(_: FastAPI):
 
     request_queue = queue.Queue()
     worker_streams = []
+    worker_stream_locks = []
     worker_stream_voice_names = []
     for worker_index in range(MAX_CONCURRENT_STREAMS):
         worker_stream = create_bound_stream(resolve_voice(DEFAULT_VOICE), f"worker {worker_index} startup")
         worker_streams.append(worker_stream)
+        worker_stream_locks.append(threading.Lock())
         worker_stream_voice_names.append(DEFAULT_VOICE)
     print(
         f"[web] worker bound streams ready count={len(worker_streams)} voice={DEFAULT_VOICE}",
@@ -695,6 +874,7 @@ async def lifespan(_: FastAPI):
         except Exception:
             pass
     worker_streams = []
+    worker_stream_locks = []
     worker_stream_voice_names = []
 
     if engine is not None:
@@ -716,35 +896,56 @@ async def api_tts(request: Request):
     voice_name = payload.get("voice")
     voice_name = str(voice_name).strip() if voice_name is not None and str(voice_name).strip() else None
     token = str(payload.get("token", ""))
-    raw_speed = payload.get("speed", 1.0)
+    raw_speed = payload.get("speed", 0)
     try:
-        speed = float(raw_speed)
-    except (TypeError, ValueError):
-        raise HTTPException(status_code=400, detail="speed must be a number")
+        speed_step, speed = map_app_speed_to_factor(raw_speed)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     if API_STREAM_TOKEN and token != API_STREAM_TOKEN:
         raise HTTPException(status_code=404, detail="Not Found")
     if not text:
         raise HTTPException(status_code=400, detail="text must not be empty")
-    if speed <= 0:
-        raise HTTPException(status_code=400, detail="speed must be greater than 0")
 
     request_started_at = time.perf_counter()
     try:
         voice = resolve_voice(voice_name)
     except Exception as exc:
         raise HTTPException(status_code=500, detail=str(exc)) from exc
+    cache_key = _cache_key_from_text_voice(text, voice.name)
+    cached_wav = _cache_get(cache_key)
+    if cached_wav is not None:
+        print(
+            f"[web] cache hit key={cache_key[:12]} voice={voice.name} speed_step={speed_step:g} speed_factor={speed:.2f} text={text!r}",
+            flush=True,
+        )
+        base_audio = _wav_bytes_to_audio(cached_wav)
+        out_audio = time_stretch_keep_pitch(base_audio, SAMPLE_RATE, speed)
+        payload = wav_stream_header(SAMPLE_RATE) + pcm_to_int16_bytes(out_audio)
+
+        def cached_generator():
+            yield payload
+
+        return StreamingResponse(
+            content=cached_generator(),
+            media_type="audio/wav",
+            headers={
+                "Content-Type": "audio/wav",
+                "X-TTS-Cache": "HIT",
+            },
+        )
 
     task = StreamTask(
         text=text,
         speed=speed,
+        cache_key=cache_key,
         voice=voice,
         enqueued_at=time.perf_counter(),
         chunks=queue.Queue(maxsize=32),
     )
     request_queue.put(task)
     print(
-        f"[web] enqueue voice={voice.name} text={text!r} queue_size={request_queue.qsize()} total_ms={(time.perf_counter() - request_started_at) * 1000.0:.1f}",
+        f"[web] enqueue voice={voice.name} speed_step={speed_step:g} speed_factor={speed:.2f} text={text!r} queue_size={request_queue.qsize()} total_ms={(time.perf_counter() - request_started_at) * 1000.0:.1f}",
         flush=True,
     )
 
@@ -753,6 +954,7 @@ async def api_tts(request: Request):
         media_type="audio/wav",
         headers={
             "Content-Type": "audio/wav",
+            "X-TTS-Cache": "MISS",
         },
     )
 

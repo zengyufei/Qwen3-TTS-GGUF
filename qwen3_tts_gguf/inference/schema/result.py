@@ -69,6 +69,7 @@ class Timing:
     predictor_loop_times:   List[float] = field(default_factory=list)
     chunk_gen_times:        List[float] = field(default_factory=list)
     decoder_compute_times:  List[float] = field(default_factory=list)
+    wall_clock_time: float = 0.0
     
     total_steps: int = 0
 
@@ -107,6 +108,11 @@ class Timing:
         return (self.prompt_time + self.prefill_time +
                 self.total_talker_time + self.total_predictor_time +
                 self.total_decoder_time)
+
+    @property
+    def effective_total_time(self) -> float:
+        """真实等待耗时；流水线模式下优先使用 wall-clock，避免简单相加高估。"""
+        return self.wall_clock_time if self.wall_clock_time > 0 else self.total_inference_time
 
     @property
     def inference_only_time(self) -> float:
@@ -365,6 +371,8 @@ class TTSResult:
         print(f"  3. Generate:  {s.total_talker_time + s.total_predictor_time:.2f}s (Talker: {s.total_talker_time:.2f}s, Predictor: {s.total_predictor_time:.2f}s)")
         print(f"  4. Decode:    {s.total_decoder_time:.2f}s")
         print(f"  5. Latency:   {s.first_audio_latency:.2f}s (Generate: {s.first_chunk_latency:.2f}s, Decode: {s.first_decode_latency:.2f}s)")
+        if s.wall_clock_time > 0:
+            print(f"  6. Wall:      {s.wall_clock_time:.2f}s")
             
         print("-" * 40)
-        print(f"核心总耗时: {s.inference_only_time:.2f}s | RTF (Core): {self.rtf:.2f}")
+        print(f"核心总耗时: {s.inference_only_time:.2f}s | 等待耗时: {s.effective_total_time:.2f}s | RTF (Core): {self.rtf:.2f}")

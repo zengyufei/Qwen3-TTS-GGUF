@@ -16,6 +16,10 @@ from typing import Iterable
 @dataclass
 class Case:
     chunk_size: int
+    pipeline_decode: bool
+    parallel_segments: bool
+    segment_min_chars: int
+    segment_max_chars: int
     workers: int
     ort_intra: int
     ort_inter: int
@@ -31,18 +35,92 @@ def parse_float_list(value: str) -> list[float]:
     return [float(x.strip()) for x in value.split(",") if x.strip()]
 
 
+def parse_bool_list(value: str) -> list[bool]:
+    values = []
+    for item in value.split(","):
+        token = item.strip().lower()
+        if not token:
+            continue
+        if token in ("1", "true", "yes", "on"):
+            values.append(True)
+        elif token in ("0", "false", "no", "off"):
+            values.append(False)
+        else:
+            raise ValueError(f"Invalid bool value: {item}")
+    return values
+
+
+def estimate_segment_count(text: str, min_chars: int, max_chars: int) -> int:
+    terminators = set("。！？!?；;.")
+    soft_breaks = "，,、 "
+    pieces = []
+    buf = []
+
+    def join_parts(left: str, right: str) -> str:
+        if left and right and left[-1].isascii() and right[0].isascii():
+            return f"{left} {right}"
+        return f"{left}{right}"
+
+    for ch in text.strip():
+        buf.append(ch)
+        if ch in terminators:
+            piece = "".join(buf).strip()
+            if piece:
+                pieces.append(piece)
+            buf = []
+    tail = "".join(buf).strip()
+    if tail:
+        pieces.append(tail)
+
+    long_split = []
+    for piece in pieces:
+        rest = piece
+        while len(rest) > max_chars:
+            window = rest[:max_chars]
+            cut = max(window.rfind(mark) for mark in soft_breaks)
+            if cut < min_chars:
+                cut = max_chars - 1
+            part = rest[:cut + 1].strip()
+            if part:
+                long_split.append(part)
+            rest = rest[cut + 1:].strip()
+        if rest:
+            long_split.append(rest)
+
+    merged = []
+    pending = ""
+    for piece in long_split:
+        pending = join_parts(pending, piece).strip() if pending else piece
+        if len(pending) >= min_chars:
+            merged.append(pending)
+            pending = ""
+    if pending:
+        if merged:
+            merged[-1] = join_parts(merged[-1], pending).strip()
+        else:
+            merged.append(pending)
+    return len([seg for seg in merged if seg])
+
+
 def build_cases(args: argparse.Namespace) -> list[Case]:
     return [
         Case(
             chunk_size=combo[0],
-            workers=1,
-            ort_intra=combo[1],
-            ort_inter=combo[2],
-            result_poll_s=combo[3],
-            proxy_poll_s=combo[4],
+            pipeline_decode=combo[1],
+            parallel_segments=combo[2],
+            segment_min_chars=args.segment_min_chars,
+            segment_max_chars=args.segment_max_chars,
+            workers=combo[3],
+            ort_intra=combo[4],
+            ort_inter=combo[5],
+            result_poll_s=combo[6],
+            proxy_poll_s=combo[7],
         )
         for combo in itertools.product(
             parse_int_list(args.chunk_sizes),
+            parse_bool_list(args.pipeline_decode),
+            parse_bool_list(args.parallel_segments),
+            parse_int_list(args.workers),
             parse_int_list(args.ort_intra_threads),
             parse_int_list(args.ort_inter_threads),
             parse_float_list(args.result_poll_seconds),
@@ -121,8 +199,12 @@ def spawn_server(
         {
             "QWEN_TTS_PORT": str(port),
             "QWEN_TTS_ONNX_PROVIDER": "CUDA",
-            "QWEN_TTS_STREAM_WORKERS": "1",
+            "QWEN_TTS_STREAM_WORKERS": str(case.workers),
             "QWEN_TTS_CHUNK_SIZE": str(case.chunk_size),
+            "QWEN_TTS_PIPELINE_DECODE": "1" if case.pipeline_decode else "0",
+            "QWEN_TTS_PARALLEL_SEGMENTS": "1" if case.parallel_segments else "0",
+            "QWEN_TTS_SEGMENT_MIN_CHARS": str(case.segment_min_chars),
+            "QWEN_TTS_SEGMENT_MAX_CHARS": str(case.segment_max_chars),
             "QWEN_TTS_ORT_ALLOW_SPINNING": "1",
             "QWEN_TTS_ORT_INTRA_OP_THREADS": str(case.ort_intra),
             "QWEN_TTS_ORT_INTER_OP_THREADS": str(case.ort_inter),
@@ -209,7 +291,11 @@ def main() -> int:
     parser.add_argument("--token", default="zengleqi")
     parser.add_argument("--text", default="benchmark request for tts latency and rtf")
     parser.add_argument("--chunk-sizes", default="24,32,48")
-    parser.add_argument("--workers", default="1")
+    parser.add_argument("--pipeline-decode", default="0,1")
+    parser.add_argument("--parallel-segments", default="0,1")
+    parser.add_argument("--workers", default="2")
+    parser.add_argument("--segment-min-chars", type=int, default=20)
+    parser.add_argument("--segment-max-chars", type=int, default=120)
     parser.add_argument("--ort-intra-threads", default="0,4")
     parser.add_argument("--ort-inter-threads", default="0")
     parser.add_argument("--result-poll-seconds", default="0.005")
@@ -224,8 +310,10 @@ def main() -> int:
 
     results: list[dict] = []
     for idx, case in enumerate(cases, start=1):
+        segment_count = estimate_segment_count(args.text, case.segment_min_chars, case.segment_max_chars)
+        effective_segment_count = segment_count if case.parallel_segments else 1
         print(
-            f"[{idx}/{len(cases)}] chunk={case.chunk_size} workers={case.workers} "
+            f"[{idx}/{len(cases)}] chunk={case.chunk_size} pipeline={int(case.pipeline_decode)} parallel={int(case.parallel_segments)} segments={effective_segment_count} workers={case.workers} "
             f"intra={case.ort_intra} inter={case.ort_inter} "
             f"resultPoll={case.result_poll_s} proxyPoll={case.proxy_poll_s}"
         )
@@ -252,6 +340,9 @@ def main() -> int:
                         "case_index": idx,
                         "repeat": rep,
                         "chunk_size": case.chunk_size,
+                        "pipeline_decode": int(case.pipeline_decode),
+                        "parallel_segments": int(case.parallel_segments),
+                        "segment_count": effective_segment_count,
                         "workers": case.workers,
                         "ort_intra": case.ort_intra,
                         "ort_inter": case.ort_inter,
@@ -282,6 +373,9 @@ def main() -> int:
                     "case_index": idx,
                     "repeat": -1,
                     "chunk_size": case.chunk_size,
+                    "pipeline_decode": int(case.pipeline_decode),
+                    "parallel_segments": int(case.parallel_segments),
+                    "segment_count": effective_segment_count,
                     "workers": case.workers,
                     "ort_intra": case.ort_intra,
                     "ort_inter": case.ort_inter,
@@ -319,7 +413,7 @@ def main() -> int:
         for i, row in enumerate(best, start=1):
             print(
                 f"{i:2d}. total={row['total_ms']}ms ttfb={row['ttfb_ms']}ms "
-                f"rtf={row['rtf']} chunk={row['chunk_size']} workers={row['workers']} "
+                f"rtf={row['rtf']} chunk={row['chunk_size']} pipeline={row['pipeline_decode']} parallel={row['parallel_segments']} segments={row['segment_count']} workers={row['workers']} "
                 f"intra={row['ort_intra']} inter={row['ort_inter']}"
             )
 
